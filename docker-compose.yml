@@ -1,0 +1,49 @@
+# PolicyMind 依赖容器：Chroma + MySQL + Redis
+# 启动：docker compose up -d
+# 端口：Chroma 容器内 8000 → 宿主机 8082（避开 FastAPI 8000）；MySQL 3306 → 33307；Redis 6379 → 6380（与已部署容器一致）
+services:
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: policymind-chroma
+    ports:
+      - "8082:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    container_name: policymind-mysql
+    ports:
+      - "33307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-policymind}
+      MYSQL_USER: ${MYSQL_USER:-policymind}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # 控制内存占用（默认 400MB+）
+      - --innodb-buffer-pool-size=256M
+      - --performance-schema=OFF
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: policymind-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  chroma_data:
+  mysql_data:
+  redis_data:

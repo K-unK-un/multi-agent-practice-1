@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolicyMind · 企业制度智能问答</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+    <main class="chat-panel">
+        <header class="chat-header">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true">PM</span>
+                <div class="brand-text">
+                    <h1>PolicyMind</h1>
+                    <p>企业制度智能问答</p>
+                </div>
+            </div>
+            <span class="status-pill">多 Agent · RAG</span>
+        </header>
+
+        <div class="messages" id="messages" aria-live="polite">
+            <section class="welcome" id="welcome">
+                <h2>您好，我是 PolicyMind</h2>
+                <p>基于 LangGraph 多 Agent 协作与企业制度知识库，为您解答考勤、休假、报销、权限等问题，并给出可核验的条款引用。</p>
+                <div class="suggestions">
+                    <button type="button" class="suggestion" data-q="工龄 12 年，病假 3 个月工资怎么算？">工龄 12 年，病假 3 个月工资怎么算？</button>
+                    <button type="button" class="suggestion" data-q="年假可以跨年休吗？">年假可以跨年休吗？</button>
+                    <button type="button" class="suggestion" data-q="2025 版差旅标准和 2022 版有何不同？">2025 版差旅标准和 2022 版有何不同？</button>
+                </div>
+            </section>
+        </div>
+
+        <footer class="composer">
+            <div class="scope-row">
+                <span class="scope-label">身份范围</span>
+                <label class="scope-chip">
+                    <input type="checkbox" value="employee" checked>
+                    <span>员工</span>
+                </label>
+                <label class="scope-chip">
+                    <input type="checkbox" value="manager">
+                    <span>管理层</span>
+                </label>
+                <span class="session-hint">固定会话 · 自动保存</span>
+            </div>
+            <div class="input-row">
+                <textarea id="questionInput" rows="2" maxlength="4000"
+                          placeholder="请输入您的问题，例如：工龄 12 年，病假 3 个月工资怎么算？"></textarea>
+                <button type="button" class="send-btn" id="sendBtn">
+                    <span class="send-label">发送</span>
+                </button>
+            </div>
+            <p class="composer-hint">Enter 发送 · Shift + Enter 换行 · 答案中的【E1】可点击查看条款</p>
+        </footer>
+    </main>
+
+    <aside class="trace-panel" aria-label="Agent 链路可视化">
+        <header class="trace-header">
+            <div class="trace-title">
+                <h2>Agent 链路</h2>
+                <p>实时展示调度、专家、综合与核查过程</p>
+            </div>
+            <span class="intent-badge" id="intentBadge">意图：等待提问</span>
+        </header>
+
+        <div class="trace-status" id="traceStatus">发送问题后，这里会实时展示多 Agent 协作过程。</div>
+
+        <div class="flow" id="flow">
+            <div class="node node-supervisor" data-agent="supervisor">
+                <span class="node-name">调度中枢</span>
+                <span class="node-sub">supervisor</span>
+                <span class="node-tool"></span>
+            </div>
+
+            <svg class="connector conn-top" viewBox="0 0 300 34" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M150 0 V10 M50 10 H250 M50 10 V24 M150 10 V24 M250 10 V24"/>
+                <path d="M44 18 L50 26 L56 18 M144 18 L150 26 L156 18 M244 18 L250 26 L256 18"/>
+            </svg>
+
+            <div class="node node-policy_qa" data-agent="policy_qa">
+                <span class="node-name">制度问答</span>
+                <span class="node-sub">policy_qa</span>
+                <span class="node-tool"></span>
+            </div>
+            <div class="node node-compare" data-agent="compare">
+                <span class="node-name">版本对比</span>
+                <span class="node-sub">compare</span>
+                <span class="node-tool"></span>
+            </div>
+            <div class="node node-eligibility" data-agent="eligibility">
+                <span class="node-name">资格计算</span>
+                <span class="node-sub">eligibility</span>
+                <span class="node-tool"></span>
+            </div>
+
+            <svg class="connector conn-mid" viewBox="0 0 300 42" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M50 0 V12 M150 0 V12 M250 0 V12 M50 12 H250 M150 12 V32"/>
+                <path d="M144 26 L150 34 L156 26"/>
+            </svg>
+
+            <div class="node node-synthesize" data-agent="synthesize">
+                <span class="node-name">综合生成</span>
+                <span class="node-sub">synthesize</span>
+                <span class="node-tool"></span>
+            </div>
+
+            <svg class="connector conn-low" viewBox="0 0 300 30" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M150 0 V20"/>
+                <path d="M144 14 L150 22 L156 14"/>
+            </svg>
+
+            <div class="node node-critic" data-agent="critic">
+                <span class="node-name">质量核查</span>
+                <span class="node-sub">critic</span>
+                <span class="node-tool"></span>
+            </div>
+        </div>
+
+        <div class="review-banner hidden" id="reviewBanner"></div>
+        <div class="done-meta hidden" id="doneMeta"></div>
+
+        <section class="citation-panel">
+            <div class="citation-head">
+                <h3>引用条款</h3>
+                <span class="citation-count" id="citationCount">0</span>
+            </div>
+            <div class="citation-list" id="citationList">
+                <p class="empty">暂无引用</p>
+            </div>
+        </section>
+    </aside>
+</div>
+
+<div class="modal-overlay hidden" id="modalOverlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <button type="button" class="modal-close" id="modalClose" aria-label="关闭">×</button>
+        <h3 id="modalTitle">条款详情</h3>
+        <p class="modal-meta" id="modalMeta"></p>
+        <div class="modal-body" id="modalBody"></div>
+    </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
