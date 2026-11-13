@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 1440
     max_upload_mb: int = 50
     cors_origins: list[str] = ["http://localhost:8000"]
-    auth_enabled: bool = False
+    auth_enabled: bool = True
     upload_dir: str = "data/uploads"
 
     # ---------------- 日志与评估 ----------------

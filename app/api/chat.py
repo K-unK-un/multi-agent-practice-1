@@ -7,12 +7,13 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.logger import get_logger
 from app.core.metrics import metrics
+from app.core.security import require_auth
 from app.graph.supervisor_graph import run_answer_once, stream_answer
 from app.store.mysql import get_mysql
 
@@ -116,11 +117,12 @@ def _save_messages(
     agents_used: Any = None,
     token_usage: Any = None,
     latency_ms: int | None = None,
+    user_id: int | None = None,
 ) -> None:
     """落库用户问题与助手回答；任何异常只记日志，不中断流/响应。"""
     try:
         store = get_mysql()
-        store.append_message({"session_id": session_id, "role": "user", "content": question})
+        store.append_message({"session_id": session_id, "role": "user", "content": question, "user_id": user_id})
         store.append_message(
             {
                 "session_id": session_id,
@@ -130,6 +132,7 @@ def _save_messages(
                 "agents_used": _json_safe(agents_used or []),
                 "token_usage": _json_safe(token_usage or {}),
                 "latency_ms": _as_int(latency_ms),
+                "user_id": user_id,
             }
         )
     except Exception:
@@ -137,13 +140,18 @@ def _save_messages(
 
 
 @router.post("/stream")
-async def chat_stream(body: ChatStreamRequest) -> StreamingResponse:
+async def chat_stream(
+    body: ChatStreamRequest,
+    current_user: dict[str, Any] = Depends(require_auth),
+) -> StreamingResponse:
     """SSE 流式问答：事件与 LangGraph 图事件一一对应。"""
     session_id = body.session_id or await asyncio.to_thread(
         _new_session_id, body.user_scope
     )
     question = body.question
     user_scope = body.user_scope
+    user_level = int(current_user.get("level") or 1)
+    user_id = _as_int(current_user.get("id"))
 
     async def event_generator():
         started = time.perf_counter()
@@ -162,6 +170,7 @@ async def chat_stream(body: ChatStreamRequest) -> StreamingResponse:
                 question=question,
                 user_scope=user_scope,
                 session_id=session_id,
+                user_level=user_level,
             ):
                 event_name = str(item.get("event") or "message")
                 data = item.get("data")
@@ -219,6 +228,7 @@ async def chat_stream(body: ChatStreamRequest) -> StreamingResponse:
                         agents_used=agents_used,
                         token_usage=done.get("token_usage") or {},
                         latency_ms=latency_ms,
+                        user_id=user_id,
                     )
 
             metrics.record_request(latency_ms, agents_used)
@@ -235,7 +245,10 @@ async def chat_stream(body: ChatStreamRequest) -> StreamingResponse:
 
 
 @router.post("")
-def chat_once(body: ChatRequest) -> dict[str, Any]:
+def chat_once(
+    body: ChatRequest,
+    current_user: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
     """非流式问答（评测 / 调试）：同步执行，阻塞在 FastAPI 线程池中。"""
     session_id = body.session_id or _new_session_id(body.user_scope)
     started = time.perf_counter()
@@ -244,6 +257,7 @@ def chat_once(body: ChatRequest) -> dict[str, Any]:
             question=body.question,
             user_scope=body.user_scope,
             session_id=session_id,
+            user_level=int(current_user.get("level") or 1),
         )
     except Exception as exc:
         metrics.record_error()
@@ -281,14 +295,18 @@ def chat_once(body: ChatRequest) -> dict[str, Any]:
         agents_used=agents_used,
         token_usage=payload.get("token_usage"),
         latency_ms=latency_ms,
+        user_id=_as_int(current_user.get("id")),
     )
     metrics.record_request(latency_ms, agents_used)
     return payload
 
 
 @router.get("/history/{session_id}")
-def chat_history(session_id: str) -> list[dict[str, Any]]:
-    """返回会话消息（只暴露 role/content/created_at）。"""
+def chat_history(
+    session_id: str,
+    current_user: dict[str, Any] = Depends(require_auth),
+) -> list[dict[str, Any]]:
+    """返回会话消息（只暴露 role/content/created_at）。普通用户只能读自己的会话，管理员可读任意。"""
     try:
         rows = get_mysql().list_messages(session_id) or []
     except Exception:
@@ -297,6 +315,15 @@ def chat_history(session_id: str) -> list[dict[str, Any]]:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="读取会话历史失败",
         )
+
+    # 会话归属校验：匿名（开发模式）不校验；管理员放行；普通用户只能看自己的
+    owner_id = _as_int(_field(rows[0], "user_id")) if rows else None
+    if (
+        current_user.get("role") != "admin"
+        and owner_id is not None
+        and owner_id != _as_int(current_user.get("id"))
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权查看他人会话")
 
     history: list[dict[str, Any]] = []
     for row in rows:

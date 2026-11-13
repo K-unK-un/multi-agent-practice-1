@@ -7,6 +7,41 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<!-- 登录 / 注册 -->
+<div class="auth-overlay" id="authOverlay">
+    <div class="auth-card">
+        <div class="auth-brand">
+            <span class="brand-mark" aria-hidden="true">PM</span>
+            <h1>PolicyMind</h1>
+            <p>企业制度智能问答 · 分级授权</p>
+        </div>
+        <div class="auth-tabs">
+            <button type="button" class="auth-tab active" data-mode="login">登录</button>
+            <button type="button" class="auth-tab" data-mode="register">注册</button>
+        </div>
+        <form class="auth-form" id="authForm" autocomplete="on">
+            <label class="auth-field">
+                <span>用户名</span>
+                <input type="text" id="authUsername" maxlength="32" autocomplete="username"
+                       placeholder="3~32 位字母 / 数字 / 下划线 / 中文" required>
+            </label>
+            <label class="auth-field">
+                <span>密码</span>
+                <input type="password" id="authPassword" maxlength="64" autocomplete="current-password"
+                       placeholder="至少 6 位" required>
+            </label>
+            <label class="auth-field hidden" id="authPassword2Field">
+                <span>确认密码</span>
+                <input type="password" id="authPassword2" maxlength="64" autocomplete="new-password"
+                       placeholder="再次输入密码">
+            </label>
+            <p class="auth-error hidden" id="authError"></p>
+            <p class="auth-hint" id="authHint">新用户注册后自动为 1 级；等级由管理员设置，等级越高可见信息越多。</p>
+            <button type="submit" class="auth-submit" id="authSubmit">登 录</button>
+        </form>
+    </div>
+</div>
+
 <div class="app">
     <main class="chat-panel">
         <header class="chat-header">
@@ -17,7 +52,15 @@
                     <p>企业制度智能问答</p>
                 </div>
             </div>
-            <span class="status-pill">多 Agent · RAG</span>
+            <div class="header-right">
+                <span class="status-pill">多 Agent · RAG</span>
+                <div class="user-area" id="userArea">
+                    <button type="button" class="admin-btn hidden" id="adminBtn">用户管理</button>
+                    <span class="level-badge" id="levelBadge" title="信息层级">Lv.1</span>
+                    <span class="user-name" id="userName">未登录</span>
+                    <button type="button" class="logout-btn" id="logoutBtn" title="退出登录">退出</button>
+                </div>
+            </div>
         </header>
 
         <div class="messages" id="messages" aria-live="polite">
@@ -139,6 +182,35 @@
         <h3 id="modalTitle">条款详情</h3>
         <p class="modal-meta" id="modalMeta"></p>
         <div class="modal-body" id="modalBody"></div>
+    </div>
+</div>
+
+<!-- 管理员：用户管理 -->
+<div class="modal-overlay hidden" id="adminOverlay">
+    <div class="modal admin-modal" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
+        <button type="button" class="modal-close" id="adminClose" aria-label="关闭">×</button>
+        <div class="admin-head">
+            <div>
+                <h3 id="adminTitle">用户管理</h3>
+                <p class="admin-sub">设置用户信息层级（1~4 级）。等级越高，可见的文献与信息越多；4 级查看权限同管理员。</p>
+            </div>
+            <button type="button" class="admin-refresh" id="adminRefresh">刷新列表</button>
+        </div>
+        <div class="admin-error hidden" id="adminError"></div>
+        <div class="admin-table-wrap">
+            <table class="admin-table">
+                <thead>
+                    <tr>
+                        <th>ID</th><th>用户名</th><th>角色</th><th>信息层级</th><th>状态</th>
+                        <th>最近登录</th><th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="adminTbody">
+                    <tr><td colspan="7" class="admin-empty">加载中…</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <p class="admin-hint">管理员等级恒为 4 级（不可修改）。禁用后该用户无法登录。</p>
     </div>
 </div>
 

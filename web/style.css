@@ -1106,3 +1106,390 @@ textarea {
         padding: 0 12px;
     }
 }
+
+/* ================================================================
+   登录 / 注册
+   ================================================================ */
+.auth-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #101828 0%, #1d2a4a 100%);
+}
+
+.auth-overlay.hidden {
+    display: none;
+}
+
+.auth-card {
+    width: min(420px, calc(100vw - 48px));
+    padding: 36px 32px 28px;
+    border-radius: 16px;
+    background: #ffffff;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+}
+
+.auth-brand {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.auth-brand .brand-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    font-size: 18px;
+    font-weight: 700;
+    color: #ffffff;
+    background: #4f6ef7;
+}
+
+.auth-brand h1 {
+    margin: 10px 0 2px;
+    font-size: 22px;
+    color: #101828;
+}
+
+.auth-brand p {
+    margin: 0;
+    font-size: 13px;
+    color: #667085;
+}
+
+.auth-tabs {
+    display: flex;
+    margin-bottom: 18px;
+    border-radius: 10px;
+    background: #f2f4f7;
+    padding: 4px;
+}
+
+.auth-tab {
+    flex: 1;
+    padding: 9px 0;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    font-size: 14px;
+    color: #475467;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.auth-tab.active {
+    background: #ffffff;
+    color: #4f6ef7;
+    font-weight: 600;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.12);
+}
+
+.auth-field {
+    display: block;
+    margin-bottom: 14px;
+}
+
+.auth-field > span {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #344054;
+}
+
+.auth-field input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d0d5dd;
+    border-radius: 8px;
+    font-size: 14px;
+    color: #101828;
+    background: #ffffff;
+    box-sizing: border-box;
+}
+
+.auth-field input:focus {
+    outline: none;
+    border-color: #4f6ef7;
+    box-shadow: 0 0 0 3px rgba(79, 110, 247, 0.15);
+}
+
+.auth-error {
+    margin: 4px 0 10px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    color: #b42318;
+    background: #fef3f2;
+    border: 1px solid #fecdca;
+}
+
+.auth-hint {
+    margin: 4px 0 14px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #667085;
+}
+
+.auth-submit {
+    width: 100%;
+    padding: 11px 0;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: #ffffff;
+    background: #4f6ef7;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.auth-submit:hover {
+    background: #3e5cf0;
+}
+
+.auth-submit:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* ================================================================
+   用户栏 / 等级徽章
+   ================================================================ */
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.user-area {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.user-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: #344054;
+}
+
+.level-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: default;
+}
+
+.level-1 { background: #eef2f6; color: #475467; }
+.level-2 { background: #e0ecff; color: #1d4ed8; }
+.level-3 { background: #f3e8ff; color: #7c3aed; }
+.level-4 { background: #fef3c7; color: #b45309; }
+
+.admin-btn {
+    padding: 5px 12px;
+    border: 1px solid #4f6ef7;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #4f6ef7;
+    background: transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.admin-btn:hover {
+    color: #ffffff;
+    background: #4f6ef7;
+}
+
+.logout-btn {
+    padding: 5px 10px;
+    border: 1px solid #d0d5dd;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #667085;
+    background: transparent;
+    cursor: pointer;
+}
+
+.logout-btn:hover {
+    color: #b42318;
+    border-color: #fecdca;
+    background: #fef3f2;
+}
+
+/* ================================================================
+   管理员面板
+   ================================================================ */
+.admin-modal {
+    width: min(860px, calc(100vw - 48px));
+    max-height: 84vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.admin-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+}
+
+.admin-head h3 {
+    margin: 0 0 4px;
+    font-size: 17px;
+    color: #101828;
+}
+
+.admin-sub {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #667085;
+}
+
+.admin-refresh {
+    flex-shrink: 0;
+    padding: 7px 14px;
+    border: 1px solid #d0d5dd;
+    border-radius: 8px;
+    font-size: 13px;
+    color: #344054;
+    background: #ffffff;
+    cursor: pointer;
+}
+
+.admin-refresh:hover {
+    border-color: #4f6ef7;
+    color: #4f6ef7;
+}
+
+.admin-error {
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    color: #b42318;
+    background: #fef3f2;
+    border: 1px solid #fecdca;
+}
+
+.admin-error.admin-success {
+    color: #027a48;
+    background: #ecfdf3;
+    border-color: #abefc6;
+}
+
+.admin-table-wrap {
+    flex: 1;
+    overflow: auto;
+    border: 1px solid #eaecf0;
+    border-radius: 10px;
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.admin-table th,
+.admin-table td {
+    padding: 9px 12px;
+    text-align: left;
+    border-bottom: 1px solid #eaecf0;
+    white-space: nowrap;
+}
+
+.admin-table th {
+    position: sticky;
+    top: 0;
+    background: #f9fafb;
+    color: #475467;
+    font-weight: 600;
+    z-index: 1;
+}
+
+.admin-table tr:last-child td {
+    border-bottom: none;
+}
+
+.admin-table tr.row-disabled td {
+    color: #98a2b3;
+    background: #fcfcfd;
+}
+
+.admin-empty {
+    text-align: center;
+    color: #98a2b3;
+    padding: 24px 0 !important;
+}
+
+.level-select {
+    padding: 4px 8px;
+    border: 1px solid #d0d5dd;
+    border-radius: 6px;
+    font-size: 13px;
+    color: #344054;
+    background: #ffffff;
+    cursor: pointer;
+}
+
+.level-select:focus {
+    outline: none;
+    border-color: #4f6ef7;
+}
+
+.admin-fixed-hint,
+.admin-self-tag {
+    font-size: 12px;
+    color: #98a2b3;
+}
+
+.admin-op {
+    margin-right: 6px;
+    padding: 4px 10px;
+    border: 1px solid #d0d5dd;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #475467;
+    background: #ffffff;
+    cursor: pointer;
+}
+
+.admin-op:hover {
+    border-color: #4f6ef7;
+    color: #4f6ef7;
+}
+
+.admin-hint {
+    margin: 12px 0 0;
+    font-size: 12px;
+    color: #98a2b3;
+}
+
+/* 窄屏：用户栏收窄 */
+@media (max-width: 760px) {
+    .header-right {
+        gap: 6px;
+    }
+    .user-area {
+        gap: 5px;
+    }
+    .user-name {
+        max-width: 90px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+}

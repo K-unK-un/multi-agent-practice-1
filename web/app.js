@@ -7,7 +7,15 @@
     "use strict";
 
     const SESSION_KEY = "policymind_session_id";
+    const AUTH_KEY = "policymind_auth";
     const API_STREAM = "/api/chat/stream";
+
+    const LEVEL_LABELS = {
+        1: { text: "Lv.1", title: "一级：基础公开信息" },
+        2: { text: "Lv.2", title: "二级：部门内信息" },
+        3: { text: "Lv.3", title: "三级：中高层信息" },
+        4: { text: "Lv.4", title: "四级：全部信息（同管理员查看权限）" },
+    };
 
     const AGENT_LABELS = {
         supervisor: "调度中枢",
@@ -36,6 +44,25 @@
         modalMeta: $("modalMeta"),
         modalBody: $("modalBody"),
         modalClose: $("modalClose"),
+        authOverlay: $("authOverlay"),
+        authForm: $("authForm"),
+        authUsername: $("authUsername"),
+        authPassword: $("authPassword"),
+        authPassword2: $("authPassword2"),
+        authPassword2Field: $("authPassword2Field"),
+        authError: $("authError"),
+        authHint: $("authHint"),
+        authSubmit: $("authSubmit"),
+        userArea: $("userArea"),
+        userName: $("userName"),
+        levelBadge: $("levelBadge"),
+        adminBtn: $("adminBtn"),
+        logoutBtn: $("logoutBtn"),
+        adminOverlay: $("adminOverlay"),
+        adminClose: $("adminClose"),
+        adminRefresh: $("adminRefresh"),
+        adminTbody: $("adminTbody"),
+        adminError: $("adminError"),
     };
 
     const state = {
@@ -48,6 +75,9 @@
         flashTimers: new Map(),
         running: new Set(),
         agentsSeen: [],
+        auth: loadAuth(),
+        authMode: "login",
+        adminUsers: [],
     };
 
     // ---------------------------------------------------------------- 会话
@@ -77,6 +107,299 @@
             .map((input) => input.value)
             .filter(Boolean);
         return checked.length ? checked : null;
+    }
+
+    // ---------------------------------------------------------------- 认证
+
+    function loadAuth() {
+        try {
+            const raw = localStorage.getItem(AUTH_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.token && parsed.user) return parsed;
+        } catch (err) {
+            /* ignore */
+        }
+        return null;
+    }
+
+    function saveAuth(auth) {
+        state.auth = auth;
+        try {
+            if (auth) localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
+            else localStorage.removeItem(AUTH_KEY);
+        } catch (err) {
+            /* ignore */
+        }
+    }
+
+    function authHeaders() {
+        return state.auth && state.auth.token
+            ? { Authorization: "Bearer " + state.auth.token }
+            : {};
+    }
+
+    function showAuth(message) {
+        els.authOverlay.classList.remove("hidden");
+        if (message) showAuthError(message);
+        els.authUsername.focus();
+    }
+
+    function hideAuth() {
+        els.authOverlay.classList.add("hidden");
+    }
+
+    function showAuthError(text) {
+        els.authError.textContent = text || "";
+        els.authError.classList.toggle("hidden", !text);
+    }
+
+    function renderUserArea() {
+        const auth = state.auth;
+        if (!auth || !auth.user) {
+            els.userName.textContent = "未登录";
+            els.levelBadge.className = "level-badge";
+            els.levelBadge.textContent = "";
+            els.adminBtn.classList.add("hidden");
+            return;
+        }
+        const user = auth.user;
+        els.userName.textContent = user.username || "用户";
+        if (user.role === "admin") {
+            els.userName.textContent += "（管理员）";
+        }
+
+        const level = Number(user.level) || 1;
+        const info = LEVEL_LABELS[level] || LEVEL_LABELS[1];
+        els.levelBadge.textContent = info.text;
+        els.levelBadge.className = "level-badge level-" + level;
+        els.levelBadge.title = info.title + (user.role === "admin" ? " · 管理员" : "");
+
+        els.adminBtn.classList.toggle("hidden", user.role !== "admin");
+    }
+
+    function logout() {
+        saveAuth(null);
+        hideAuth();
+        showAuth();
+        renderUserArea();
+    }
+
+    function handleAuthError(status, detail) {
+        if (status === 401) {
+            // token 失效/过期/被禁用：强制回到登录页
+            logout();
+            showAuthError(detail || "登录已失效，请重新登录");
+        } else {
+            showAuthError(detail || "操作失败（HTTP " + status + "）");
+        }
+    }
+
+    async function submitAuth(event) {
+        event.preventDefault();
+        showAuthError("");
+
+        const username = els.authUsername.value.trim();
+        const password = els.authPassword.value;
+
+        if (state.authMode === "register") {
+            if (password !== els.authPassword2.value) {
+                showAuthError("两次输入的密码不一致");
+                return;
+            }
+            if (!/^[\w一-龥]{3,32}$/.test(username)) {
+                showAuthError("用户名需为 3~32 位字母、数字、下划线或中文");
+                return;
+            }
+        }
+
+        const path = state.authMode === "register" ? "/api/auth/register" : "/api/auth/login";
+        els.authSubmit.disabled = true;
+        try {
+            const response = await fetch(path, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: username, password: password }),
+            });
+            if (!response.ok) {
+                let detail = "HTTP " + response.status;
+                try {
+                    const payload = await response.json();
+                    if (payload && payload.detail) {
+                        detail = typeof payload.detail === "string" ? payload.detail : stringifyValue(payload.detail);
+                    }
+                } catch (err) {
+                    /* ignore */
+                }
+                showAuthError(detail);
+                return;
+            }
+            const payload = await response.json();
+            saveAuth({ token: payload.token, user: payload.user });
+            hideAuth();
+            renderUserArea();
+            els.authForm.reset();
+        } catch (err) {
+            showAuthError("网络请求失败：" + (err && err.message ? err.message : err));
+        } finally {
+            els.authSubmit.disabled = false;
+        }
+    }
+
+    // ---------------------------------------------------------------- 管理员面板
+
+    function formatAdminDate(value) {
+        if (value === null || value === undefined || value === "") return "—";
+        return String(value).replace("T", " ").slice(0, 16);
+    }
+
+    async function loadAdminUsers() {
+        els.adminError.classList.add("hidden");
+        els.adminTbody.replaceChildren();
+        const row = document.createElement("tr");
+        row.innerHTML = '<td colspan="7" class="admin-empty">加载中…</td>';
+        els.adminTbody.appendChild(row);
+        try {
+            const response = await fetch("/api/admin/users", { headers: authHeaders() });
+            if (!response.ok) {
+                let detail = "HTTP " + response.status;
+                try {
+                    const payload = await response.json();
+                    if (payload && payload.detail) detail = payload.detail;
+                } catch (err) { /* ignore */ }
+                throw new Error(detail);
+            }
+            const payload = await response.json();
+            state.adminUsers = Array.isArray(payload.users) ? payload.users : [];
+            renderAdminTable();
+        } catch (err) {
+            els.adminTbody.replaceChildren();
+            els.adminError.textContent = "加载失败：" + (err && err.message ? err.message : err);
+            els.adminError.classList.remove("hidden");
+        }
+    }
+
+    function renderAdminTable() {
+        els.adminTbody.replaceChildren();
+        if (!state.adminUsers.length) {
+            const row = document.createElement("tr");
+            row.innerHTML = '<td colspan="7" class="admin-empty">暂无用户</td>';
+            els.adminTbody.appendChild(row);
+            return;
+        }
+        state.adminUsers.forEach((user) => {
+            const tr = document.createElement("tr");
+            tr.dataset.uid = String(user.id);
+            if (!user.is_active) tr.classList.add("row-disabled");
+
+            const cells = [
+                String(user.id),
+                String(user.username),
+                user.role === "admin" ? "管理员" : "普通用户",
+                "", // 等级 select
+                user.is_active ? "正常" : "已禁用",
+                formatAdminDate(user.last_login_at),
+                "", // 操作
+            ];
+            tr.append(...cells.map((text) => {
+                const td = document.createElement("td");
+                td.textContent = text;
+                return td;
+            }));
+
+            // 等级选择器
+            const levelTd = tr.children[3];
+            levelTd.textContent = "";
+            const select = document.createElement("select");
+            select.className = "level-select";
+            select.disabled = user.role === "admin";
+            for (let level = 1; level <= 4; level++) {
+                const option = document.createElement("option");
+                option.value = String(level);
+                option.textContent = "Lv." + level;
+                if ((user.role === "admin" ? 4 : Number(user.level) || 1) === level) option.selected = true;
+                select.appendChild(option);
+            }
+            if (user.role === "admin") {
+                const hint = document.createElement("span");
+                hint.className = "admin-fixed-hint";
+                hint.textContent = " 管理员恒为 Lv.4";
+                levelTd.append(select, hint);
+            } else {
+                levelTd.appendChild(select);
+                select.addEventListener("change", () => updateUser(user, { level: Number(select.value) }));
+            }
+
+            // 操作按钮
+            const opTd = tr.children[6];
+            opTd.textContent = "";
+            if (user.role !== "admin") {
+                const toggle = document.createElement("button");
+                toggle.type = "button";
+                toggle.className = "admin-op";
+                toggle.textContent = user.is_active ? "禁用" : "启用";
+                toggle.addEventListener("click", () => updateUser(user, { is_active: !user.is_active }));
+
+                const reset = document.createElement("button");
+                reset.type = "button";
+                reset.className = "admin-op";
+                reset.textContent = "重置密码";
+                reset.addEventListener("click", () => {
+                    const pw = window.prompt("为「" + user.username + "」设置新密码（至少 6 位）：");
+                    if (pw === null) return;
+                    if (pw.length < 6) {
+                        window.alert("密码至少 6 位");
+                        return;
+                    }
+                    updateUser(user, { password: pw });
+                });
+                opTd.append(toggle, reset);
+            } else {
+                const tag = document.createElement("span");
+                tag.className = "admin-self-tag";
+                tag.textContent = "—";
+                opTd.appendChild(tag);
+            }
+
+            els.adminTbody.appendChild(tr);
+        });
+    }
+
+    async function updateUser(user, patch) {
+        els.adminError.classList.add("hidden");
+        const btnLabel = patch.level ? "Lv." + patch.level : (patch.is_active === false ? "禁用" : (patch.is_active === true ? "启用" : "重置密码"));
+        try {
+            const response = await fetch("/api/admin/users/" + encodeURIComponent(user.id), {
+                method: "PATCH",
+                headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+                body: JSON.stringify(patch),
+            });
+            if (!response.ok) {
+                let detail = "HTTP " + response.status;
+                try {
+                    const payload = await response.json();
+                    if (payload && payload.detail) detail = payload.detail;
+                } catch (err) { /* ignore */ }
+                throw new Error(detail);
+            }
+            const payload = await response.json();
+            const updated = payload.user;
+            const index = state.adminUsers.findIndex((item) => String(item.id) === String(user.id));
+            if (index !== -1 && updated) state.adminUsers[index] = updated;
+            renderAdminTable();
+            els.adminError.textContent = "已更新「" + user.username + "」：" + btnLabel;
+            els.adminError.classList.add("admin-success");
+            els.adminError.classList.remove("hidden");
+        } catch (err) {
+            els.adminError.textContent = "更新失败：" + (err && err.message ? err.message : err);
+            els.adminError.classList.remove("admin-success");
+            els.adminError.classList.remove("hidden");
+        }
+    }
+
+    function openAdmin() {
+        els.adminOverlay.classList.remove("hidden");
+        loadAdminUsers();
     }
 
     // ---------------------------------------------------------------- 消息渲染
@@ -685,10 +1008,10 @@
     async function streamChat(question) {
         const response = await fetch(API_STREAM, {
             method: "POST",
-            headers: {
+            headers: Object.assign({
                 "Content-Type": "application/json",
                 "Accept": "text/event-stream",
-            },
+            }, authHeaders()),
             body: JSON.stringify({
                 session_id: state.sessionId,
                 question: question,
@@ -707,6 +1030,10 @@
                 }
             } catch (err) {
                 /* 非 JSON 错误体，保留状态码提示 */
+            }
+            if (response.status === 401) {
+                logout();
+                showAuthError(detail || "登录已失效，请重新登录");
             }
             throw new Error(detail);
         }
@@ -881,6 +1208,33 @@
 
     // ---------------------------------------------------------------- 事件绑定
 
+    // 认证：登录/注册切换
+    document.querySelectorAll(".auth-tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+            state.authMode = tab.dataset.mode;
+            document.querySelectorAll(".auth-tab").forEach((item) => {
+                item.classList.toggle("active", item === tab);
+            });
+            els.authSubmit.textContent = state.authMode === "register" ? "注 册" : "登 录";
+            els.authPassword2Field.classList.toggle("hidden", state.authMode !== "register");
+            els.authPassword2.required = state.authMode === "register";
+            els.authPassword.autocomplete = state.authMode === "register" ? "new-password" : "current-password";
+            els.authHint.classList.toggle("hidden", state.authMode === "register");
+            showAuthError("");
+        });
+    });
+
+    els.authForm.addEventListener("submit", submitAuth);
+    els.logoutBtn.addEventListener("click", logout);
+
+    // 管理员面板
+    els.adminBtn.addEventListener("click", openAdmin);
+    els.adminClose.addEventListener("click", () => els.adminOverlay.classList.add("hidden"));
+    els.adminOverlay.addEventListener("click", (event) => {
+        if (event.target === els.adminOverlay) els.adminOverlay.classList.add("hidden");
+    });
+    els.adminRefresh.addEventListener("click", loadAdminUsers);
+
     els.sendBtn.addEventListener("click", () => sendQuestion());
 
     els.input.addEventListener("keydown", (event) => {
@@ -919,10 +1273,35 @@
         if (event.target === els.modalOverlay) closeModal();
     });
     document.addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && !els.modalOverlay.classList.contains("hidden")) {
-            closeModal();
-        }
+        if (event.key !== "Escape") return;
+        if (!els.modalOverlay.classList.contains("hidden")) closeModal();
+        if (!els.adminOverlay.classList.contains("hidden")) els.adminOverlay.classList.add("hidden");
     });
 
+    // ---------------------------------------------------------------- 启动
+
+    async function boot() {
+        renderUserArea();
+        if (!state.auth) {
+            showAuth();
+            return;
+        }
+        // 静默校验 token 并刷新用户信息（管理员改等级后重新进入页面即生效）
+        try {
+            const response = await fetch("/api/auth/me", { headers: authHeaders() });
+            if (response.ok) {
+                const user = await response.json();
+                saveAuth({ token: state.auth.token, user: user });
+                renderUserArea();
+            } else if (response.status === 401) {
+                logout();
+                showAuth();
+            }
+        } catch (err) {
+            /* 网络异常不强制登出 */
+        }
+    }
+
     autoGrow();
+    boot();
 })();

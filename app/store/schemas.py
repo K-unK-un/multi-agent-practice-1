@@ -85,6 +85,7 @@ class Message(Base):
     __tablename__ = "messages"
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String(36), index=True)
+    user_id = Column(Integer, index=True)  # 提问用户（后续按用户隔离历史/审计；旧数据为 NULL）
     role = Column(String(16))
     content = Column(Text)
     citations = Column(JSON)
@@ -107,12 +108,23 @@ class Feedback(Base):
 
 
 class User(Base):
-    """最小用户体系：只做 scope 标签，不做完整 RBAC。"""
+    """用户表：用户名 + 密码注册，等级制授权。
+
+    - role: "admin"（唯一管理员，最高权限）| "user"（普通用户）
+    - level: 1~4 信息层级。注册默认 1；管理员手动设置；等级越高可见文档/信息层级越高。
+      4 级用户查看权限与管理员相同（无修改权限）；admin 恒为 4。
+    - is_active: 预留禁用账号能力
+    - scopes: 文档 scope 标签（与 level 正交，供检索层过滤，后续拓展）
+    """
 
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String(64), unique=True, nullable=False)
-    password_hash = Column(String(255))
+    username = Column(String(64), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(16), default="user", index=True)  # admin | user
+    level = Column(Integer, default=1, index=True)  # 1~4
+    is_active = Column(Boolean, default=True, index=True)
     scopes = Column(JSON, default=list)  # ["employee"] / ["hr"] / ["manager"]
-    role = Column(String(16), default="user")
     created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    last_login_at = Column(DateTime)

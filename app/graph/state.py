@@ -46,6 +46,7 @@ class SupervisorState(TypedDict, total=False):
     question: str
     session_id: str
     user_scope: list[str]
+    user_level: int  # 提问用户的信息层级 1~4（等级越高可见信息越多；RAG 分级接入点，当前透传）
     history_summary: str  # 历史压缩摘要，不给原始消息流
 
     # ---------------- 调度 ----------------
@@ -79,6 +80,7 @@ class RetrievalState(TypedDict, total=False):
     question: str
     mode: str  # auto | compare（compare 允许 archived）
     user_scope: list[str]
+    user_level: int  # 信息层级 1~4；文档分级过滤的预留接入点（当前不参与过滤）
     include_archived: bool
     queries: list[str]  # rewrite 产出的子查询
     candidates: list[dict]  # 融合后的候选条款

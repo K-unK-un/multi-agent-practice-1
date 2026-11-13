@@ -66,6 +66,7 @@ _MESSAGE_FIELDS = (
     "token_usage",
     "latency_ms",
     "trace",
+    "user_id",
 )
 _FEEDBACK_FIELDS = ("session_id", "message_id", "rating", "comment", "correction")
 
@@ -244,12 +245,52 @@ class MySQLStore:
             session.close()
 
     def init_db(self) -> None:
-        """建表（幂等）。应用启动时调用一次；重复调用不会破坏已有数据。"""
+        """建表 + 轻量迁移（幂等）。应用启动时调用一次；重复调用不会破坏已有数据。"""
         engine = self._ensure_engine()
         try:
             Base.metadata.create_all(engine)
+            self._migrate(engine)
         except Exception as exc:
             raise RuntimeError(f"MySQL 连接失败: {exc}") from exc
+
+    @staticmethod
+    def _migrate(engine) -> None:
+        """补齐历史表缺失列（MySQL 8 不支持 ADD COLUMN IF NOT EXISTS，先查 information_schema）。
+
+        仅做增量加列，不删列、不改类型，保证对已有数据零破坏。
+        """
+        from sqlalchemy import inspect as sa_inspect
+        from sqlalchemy import text
+
+        inspector = sa_inspect(engine)
+        existing_tables = set(inspector.get_table_names())
+        if not existing_tables:
+            return
+
+        def columns_of(table: str) -> set[str]:
+            if table not in existing_tables:
+                return set()
+            return {col["name"] for col in inspector.get_columns(table)}
+
+        additions: dict[str, dict[str, str]] = {
+            "users": {
+                "level": "INTEGER NOT NULL DEFAULT 1",
+                "is_active": "BOOLEAN NOT NULL DEFAULT TRUE",
+                "updated_at": "DATETIME NULL",
+                "last_login_at": "DATETIME NULL",
+            },
+            "messages": {
+                "user_id": "INTEGER NULL",
+            },
+        }
+        for table, columns in additions.items():
+            have = columns_of(table)
+            for name, ddl in columns.items():
+                if name in have:
+                    continue
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE `{table}` ADD COLUMN `{name}` {ddl}"))
+                logger.info("迁移：%s.%s 新增列 %s", table, name, ddl)
 
     def close(self) -> None:
         """释放连接池；之后再次调用任一方法会自动重建引擎。"""
@@ -558,32 +599,92 @@ class MySQLStore:
 
     # ---------------------------------------------------------------- 用户
 
+    def _user_dict(self, entity: User) -> dict:
+        data = _row_to_dict(entity)
+        data["scopes"] = _scope_list(data.get("scopes"))
+        return data
+
     def get_user(self, username: str) -> dict | None:
         with self._session_scope() as session:
             stmt = select(User).where(User.username == str(username))
             entity = session.execute(stmt).scalars().first()
-            if entity is None:
-                return None
-            data = _row_to_dict(entity)
-            data["scopes"] = _scope_list(data.get("scopes"))
-            return data
+            return self._user_dict(entity) if entity is not None else None
+
+    def get_user_by_id(self, user_id: int) -> dict | None:
+        with self._session_scope() as session:
+            entity = session.get(User, int(user_id))
+            return self._user_dict(entity) if entity is not None else None
 
     def create_user(
-        self, username: str, password_hash: str, scopes: list[str]
-    ) -> None:
+        self,
+        username: str,
+        password_hash: str,
+        *,
+        role: str = "user",
+        level: int = 1,
+        scopes: list[str] | None = None,
+    ) -> dict:
+        """创建用户。用户名唯一性由 DB 唯一索引兜底（冲突抛 IntegrityError，上层转 409）。"""
         username = str(username or "").strip()
         if not username:
             raise ValueError("create_user 缺少 username")
+        if role == "admin":
+            level = 4  # 管理员恒为最高层级
         with self._session_scope() as session:
-            session.add(
-                User(
-                    username=username,
-                    password_hash=password_hash,
-                    scopes=_scope_list(scopes),
-                    role="user",
-                    created_at=_now(),
-                )
+            entity = User(
+                username=username,
+                password_hash=password_hash,
+                scopes=_scope_list(scopes),
+                role=role,
+                level=int(level),
+                is_active=True,
+                created_at=_now(),
             )
+            session.add(entity)
+            session.flush()
+            return self._user_dict(entity)
+
+    def list_users(self) -> list[dict]:
+        """全部用户（含管理员），按创建时间倒序。"""
+        with self._session_scope() as session:
+            stmt = select(User).order_by(User.id.desc())
+            return [self._user_dict(entity) for entity in session.execute(stmt).scalars()]
+
+    def update_user(
+        self,
+        user_id: int,
+        *,
+        level: int | None = None,
+        is_active: bool | None = None,
+        password_hash: str | None = None,
+    ) -> dict | None:
+        """管理员更新用户：设等级 / 禁用启用 / 重置密码。返回更新后的用户，不存在返回 None。"""
+        with self._session_scope() as session:
+            entity = session.get(User, int(user_id))
+            if entity is None:
+                return None
+            if entity.role != "admin":  # 管理员账号等级恒为 4，不通过此接口修改
+                if level is not None:
+                    entity.level = int(level)
+            if is_active is not None:
+                entity.is_active = bool(is_active)
+            if password_hash:
+                entity.password_hash = password_hash
+            entity.updated_at = _now()
+            session.flush()
+            return self._user_dict(entity)
+
+    def touch_login(self, username: str) -> None:
+        """登录成功后刷新 last_login_at（失败静默，不影响登录流程）。"""
+        try:
+            with self._session_scope() as session:
+                entity = session.execute(
+                    select(User).where(User.username == str(username))
+                ).scalars().first()
+                if entity is not None:
+                    entity.last_login_at = _now()
+        except Exception:
+            logger.warning("更新 last_login_at 失败 username=%s", username, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

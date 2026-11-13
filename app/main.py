@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app.api import admin as admin_api
 from app.api import auth as auth_api
 from app.api import chat as chat_api
 from app.api import feedback as feedback_api
@@ -190,6 +191,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_api.router, prefix="/api")
     app.include_router(kb_api.router, prefix="/api")
     app.include_router(feedback_api.router, prefix="/api")
+    app.include_router(admin_api.router, prefix="/api")
 
     @app.get("/")
     def root() -> dict[str, str]:

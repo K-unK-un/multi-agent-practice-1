@@ -1,30 +1,49 @@
-"""认证接口：登录签发 JWT；开发模式（auth_enabled=False）开放注册。"""
+"""认证接口：注册（唯一用户名，自动 1 级）/ 登录 / 当前用户 / 修改密码。"""
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
-from app.core.config import settings
 from app.core.logger import get_logger
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import (
+    create_access_token,
+    hash_password,
+    require_auth,
+    verify_password,
+)
 from app.store.mysql import get_mysql
 
 logger = get_logger("api.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# 用户名：3~32 位，字母/数字/下划线/中文（不允许空白与特殊符号，避免日志与 URL 污染）
+_USERNAME_RE = re.compile(r"^[\w一-龥]{3,32}$")
+_PASSWORD_MIN = 6
+_PASSWORD_MAX = 64
 
-def _field(obj: Any, name: str, default: Any = None) -> Any:
-    """兼容存储层返回 dict 或 ORM 对象两种情况。"""
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
+
+def _public_user(user: dict[str, Any] | None) -> dict[str, Any]:
+    """对外暴露的用户信息（不含密码哈希）。"""
+    if not user:
+        return {}
+    return {
+        "id": user.get("id"),
+        "username": user.get("username"),
+        "role": user.get("role") or "user",
+        "level": int(user.get("level") or 1),
+        "is_active": bool(user.get("is_active", True)),
+        "scopes": list(user.get("scopes") or []),
+        "created_at": user.get("created_at"),
+        "last_login_at": user.get("last_login_at"),
+    }
 
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=128)
 
     @field_validator("username")
     @classmethod
@@ -35,55 +54,56 @@ class LoginRequest(BaseModel):
         return value
 
 
-class RegisterRequest(LoginRequest):
-    scopes: list[str] = Field(default_factory=lambda: ["employee"])
+class RegisterRequest(BaseModel):
+    """注册：仅用户名 + 密码。新用户自动 role=user、level=1。"""
 
-    @field_validator("scopes")
+    username: str = Field(min_length=3, max_length=32)
+    password: str = Field(min_length=_PASSWORD_MIN, max_length=_PASSWORD_MAX)
+
+    @field_validator("username")
     @classmethod
-    def _clean_scopes(cls, value: list[str]) -> list[str]:
-        cleaned = [str(item).strip() for item in value if item and str(item).strip()]
-        return list(dict.fromkeys(cleaned)) or ["employee"]
+    def _check_username(cls, value: str) -> str:
+        value = value.strip()
+        if not _USERNAME_RE.match(value):
+            raise ValueError("用户名需为 3~32 位字母、数字、下划线或中文")
+        return value
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=_PASSWORD_MIN, max_length=_PASSWORD_MAX)
 
 
 @router.post("/login")
 def login(body: LoginRequest) -> dict[str, Any]:
-    """用户名 + 密码登录，成功返回 JWT 与 scope 列表。"""
+    """用户名 + 密码登录，成功返回 JWT 与用户信息（含 role / level）。"""
     try:
         user = get_mysql().get_user(body.username)
     except Exception:
         logger.exception("登录时查询用户失败 username=%s", body.username)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="用户存储不可用")
 
-    password_hash = _field(user, "password_hash") if user else None
+    password_hash = user.get("password_hash") if user else None
     if not user or not password_hash or not verify_password(body.password, str(password_hash)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    scopes = [str(item) for item in (_field(user, "scopes") or []) if item]
-    if not scopes:
-        scopes = ["employee"]
-
-    token = create_access_token(body.username, scopes)
-    return {
-        "token": token,
-        "token_type": "bearer",
-        "scopes": scopes,
-        "username": body.username,
-    }
-
-
-@router.post("/register")
-def register(body: RegisterRequest) -> dict[str, Any]:
-    """开发模式开放注册；生产模式（auth_enabled=True）返回 403。"""
-    if settings.auth_enabled:
+    if not user.get("is_active", True):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="注册仅在开发模式（AUTH_ENABLED=false）开放",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="账号已被禁用，请联系管理员",
         )
 
+    token = create_access_token(user)
+    get_mysql().touch_login(str(user.get("username")))
+    return {"token": token, "token_type": "bearer", "user": _public_user(user)}
+
+
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+def register(body: RegisterRequest) -> dict[str, Any]:
+    """注册普通用户：用户名全局唯一，自动 1 级。成功即返回 token（自动登录）。"""
     store = get_mysql()
     try:
         existing = store.get_user(body.username)
@@ -95,10 +115,11 @@ def register(body: RegisterRequest) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在")
 
     try:
-        created = store.create_user(
+        user = store.create_user(
             username=body.username,
             password_hash=hash_password(body.password),
-            scopes=body.scopes,
+            role="user",
+            level=1,
         )
     except Exception as exc:
         message = str(exc).lower()
@@ -107,8 +128,36 @@ def register(body: RegisterRequest) -> dict[str, Any]:
         logger.exception("创建用户失败 username=%s", body.username)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="注册失败")
 
-    if created is False:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在")
+    logger.info("注册新用户 username=%s level=1", body.username)
+    return {"token": create_access_token(user), "token_type": "bearer", "user": _public_user(user)}
 
-    logger.info("注册新用户 username=%s scopes=%s", body.username, body.scopes)
-    return {"ok": True, "username": body.username, "scopes": body.scopes}
+
+@router.get("/me")
+def me(current_user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    """当前登录用户信息（实时从库读取，等级修改立即生效）。"""
+    return current_user
+
+
+@router.post("/change-password")
+def change_password(
+    body: ChangePasswordRequest,
+    current_user: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    """修改自己的密码（需验证旧密码）。"""
+    store = get_mysql()
+    try:
+        user = store.get_user(str(current_user.get("username")))
+    except Exception:
+        logger.exception("改密时查询用户失败")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="用户存储不可用")
+
+    if not user or not verify_password(body.old_password, str(user.get("password_hash") or "")):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="旧密码不正确")
+
+    try:
+        store.update_user(int(user["id"]), password_hash=hash_password(body.new_password))
+    except Exception:
+        logger.exception("修改密码失败 username=%s", current_user.get("username"))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="修改密码失败")
+
+    return {"ok": True, "message": "密码已更新"}

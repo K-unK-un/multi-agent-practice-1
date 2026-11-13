@@ -90,11 +90,13 @@ def _initial_state(
     user_scope: list[str] | None,
     session_id: str,
     history_summary: str,
+    user_level: int | None = None,
 ) -> dict:
     return {
         "question": question,
         "session_id": session_id,
         "user_scope": list(user_scope or ["employee"]),
+        "user_level": int(user_level or 1),
         "history_summary": history_summary or "",
         "plan": {},
         "next_agent": "",
@@ -178,12 +180,13 @@ def run_answer_once(
     user_scope: list[str] | None = None,
     session_id: str = "eval",
     history_summary: str = "",
+    user_level: int | None = None,
 ) -> dict:
     """同步跑一次完整问答，返回最终状态中的关键字段。"""
     graph = get_graph()
     if not history_summary:
         history_summary = _build_history_summary(session_id, question)
-    inputs = _initial_state(question, user_scope, session_id, history_summary)
+    inputs = _initial_state(question, user_scope, session_id, history_summary, user_level)
     config = {"configurable": {"thread_id": session_id}}
     final_state = graph.invoke(inputs, config=config)
     return {
@@ -347,6 +350,7 @@ async def stream_answer(
     question: str,
     user_scope: list[str] | None = None,
     session_id: str | None = None,
+    user_level: int | None = None,
 ) -> AsyncIterator[dict]:
     """流式执行一次问答，按 SSE 事件协议逐个 yield。
 
@@ -366,7 +370,7 @@ async def stream_answer(
         logger.warning("历史摘要生成失败：%s", exc)
         history_summary = ""
 
-    inputs = _initial_state(question, user_scope, session_id, history_summary)
+    inputs = _initial_state(question, user_scope, session_id, history_summary, user_level)
     emitted = False
     observed: dict = {}
 
