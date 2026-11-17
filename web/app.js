@@ -63,6 +63,22 @@
         adminRefresh: $("adminRefresh"),
         adminTbody: $("adminTbody"),
         adminError: $("adminError"),
+        kbBtn: $("kbBtn"),
+        kbOverlay: $("kbOverlay"),
+        kbClose: $("kbClose"),
+        kbRefresh: $("kbRefresh"),
+        kbReindex: $("kbReindex"),
+        kbUploadArea: $("kbUploadArea"),
+        kbDropzone: $("kbDropzone"),
+        kbFileInput: $("kbFileInput"),
+        kbError: $("kbError"),
+        kbTaskSection: $("kbTaskSection"),
+        kbTaskList: $("kbTaskList"),
+        kbTbody: $("kbTbody"),
+        kbDocStats: $("kbDocStats"),
+        kbTitle: $("kbTitle"),
+        kbSub: $("kbSub"),
+        kbHint: $("kbHint"),
     };
 
     const state = {
@@ -78,6 +94,8 @@
         auth: loadAuth(),
         authMode: "login",
         adminUsers: [],
+        kbDocs: [],
+        kbTasks: [],
     };
 
     // ---------------------------------------------------------------- 会话
@@ -154,6 +172,14 @@
         els.authError.classList.toggle("hidden", !text);
     }
 
+    function kbPermissions() {
+        const user = state.auth && state.auth.user;
+        const isAdmin = !!user && user.role === "admin";
+        const level = user ? Number(user.level) || 1 : 1;
+        // 入口对管理员 + 四级用户可见；只有管理员能上传/重建。
+        return { view: isAdmin || level >= 4, manage: isAdmin };
+    }
+
     function renderUserArea() {
         const auth = state.auth;
         if (!auth || !auth.user) {
@@ -161,6 +187,7 @@
             els.levelBadge.className = "level-badge";
             els.levelBadge.textContent = "";
             els.adminBtn.classList.add("hidden");
+            els.kbBtn.classList.add("hidden");
             return;
         }
         const user = auth.user;
@@ -176,10 +203,21 @@
         els.levelBadge.title = info.title + (user.role === "admin" ? " · 管理员" : "");
 
         els.adminBtn.classList.toggle("hidden", user.role !== "admin");
+
+        const perms = kbPermissions();
+        els.kbBtn.classList.toggle("hidden", !perms.view);
+        els.kbBtn.textContent = perms.manage ? "文档入库" : "知识库文档";
+        if (!perms.view) els.kbOverlay.classList.add("hidden");
     }
 
     function logout() {
         saveAuth(null);
+        state.kbTasks.forEach((task) => {
+            if (task.timer) window.clearTimeout(task.timer);
+        });
+        state.kbTasks = [];
+        els.kbOverlay.classList.add("hidden");
+        els.adminOverlay.classList.add("hidden");
         hideAuth();
         showAuth();
         renderUserArea();
@@ -400,6 +438,353 @@
     function openAdmin() {
         els.adminOverlay.classList.remove("hidden");
         loadAdminUsers();
+    }
+
+    // ---------------------------------------------------------------- 文档入库
+
+    const KB_ACCEPTED = [".pdf", ".docx", ".md", ".txt"];
+
+    function setKbNotice(text, success) {
+        els.kbError.textContent = text || "";
+        els.kbError.classList.toggle("hidden", !text);
+        els.kbError.classList.toggle("admin-success", !!success);
+    }
+
+    function openKb() {
+        const perms = kbPermissions();
+        if (!perms.view) return;
+        els.kbOverlay.classList.remove("hidden");
+        els.kbUploadArea.classList.toggle("hidden", !perms.manage);
+        els.kbReindex.classList.toggle("hidden", !perms.manage);
+        els.kbTitle.textContent = perms.manage ? "文档入库" : "知识库文档";
+        els.kbSub.textContent = perms.manage
+            ? "上传制度文档后自动解析、切分并入库；文档列表仅管理员与四级用户可见。"
+            : "您当前为四级用户，可查看已入库文档；上传与重建仅管理员可操作。";
+        els.kbHint.textContent = perms.manage
+            ? "上传后自动执行解析 → 清洗 → 条款切分 → 入库 → 向量与 BM25 索引；data/docs 中的文件可通过「重建索引」批量入库。"
+            : "四级用户仅可查看文档列表，无法上传或重建索引。";
+        setKbNotice("");
+        renderKbTasks();
+        loadKbDocs();
+    }
+
+    async function loadKbDocs() {
+        els.kbTbody.replaceChildren();
+        const loading = document.createElement("tr");
+        loading.innerHTML = '<td colspan="7" class="admin-empty">加载中…</td>';
+        els.kbTbody.appendChild(loading);
+        try {
+            const response = await fetch("/api/kb/docs?include_archived=true", { headers: authHeaders() });
+            if (!response.ok) {
+                let detail = "HTTP " + response.status;
+                try {
+                    const payload = await response.json();
+                    if (payload && payload.detail) {
+                        detail = typeof payload.detail === "string" ? payload.detail : stringifyValue(payload.detail);
+                    }
+                } catch (err) { /* ignore */ }
+                if (response.status === 401) handleAuthError(401, detail);
+                throw new Error(detail);
+            }
+            const payload = await response.json();
+            state.kbDocs = Array.isArray(payload) ? payload : [];
+            renderKbDocs();
+        } catch (err) {
+            els.kbTbody.replaceChildren();
+            const failed = document.createElement("tr");
+            failed.innerHTML = '<td colspan="7" class="admin-empty">加载失败</td>';
+            els.kbTbody.appendChild(failed);
+            els.kbDocStats.textContent = "";
+            setKbNotice("加载文档列表失败：" + (err && err.message ? err.message : err));
+        }
+    }
+
+    function renderKbDocs() {
+        els.kbTbody.replaceChildren();
+        const docs = state.kbDocs;
+        const active = docs.filter((doc) => doc.status === "active").length;
+        const clauses = docs.reduce((sum, doc) => sum + (Number(doc.clause_count) || 0), 0);
+        els.kbDocStats.textContent = "共 " + docs.length + " 份 · 生效 " + active + " · 条款 " + clauses + " 条";
+
+        if (!docs.length) {
+            const empty = document.createElement("tr");
+            empty.innerHTML = '<td colspan="7" class="admin-empty">暂无已入库文档，上传后会自动出现在这里</td>';
+            els.kbTbody.appendChild(empty);
+            return;
+        }
+
+        docs.forEach((doc) => {
+            const tr = document.createElement("tr");
+            if (doc.status !== "active") tr.classList.add("row-disabled");
+
+            const titleTd = document.createElement("td");
+            titleTd.className = "kb-title-cell";
+            const title = document.createElement("span");
+            title.className = "kb-doc-title";
+            title.textContent = doc.title || "（未命名制度）";
+            titleTd.appendChild(title);
+            if (doc.source_name) {
+                const file = document.createElement("span");
+                file.className = "kb-doc-file";
+                file.textContent = doc.source_name;
+                file.title = doc.source_name;
+                titleTd.appendChild(file);
+            }
+            tr.appendChild(titleTd);
+
+            const versionTd = document.createElement("td");
+            versionTd.textContent = doc.version || "—";
+            tr.appendChild(versionTd);
+
+            const dateTd = document.createElement("td");
+            dateTd.textContent = doc.effective_date || "—";
+            tr.appendChild(dateTd);
+
+            const statusTd = document.createElement("td");
+            const chip = document.createElement("span");
+            chip.className = "kb-status " + (doc.status === "active" ? "active" : "archived");
+            chip.textContent = doc.status === "active" ? "生效中" : "已归档";
+            statusTd.appendChild(chip);
+            tr.appendChild(statusTd);
+
+            const scopeTd = document.createElement("td");
+            scopeTd.textContent = Array.isArray(doc.scope) && doc.scope.length ? doc.scope.join("、") : "全员";
+            tr.appendChild(scopeTd);
+
+            const clauseTd = document.createElement("td");
+            clauseTd.textContent = String(Number(doc.clause_count) || 0);
+            tr.appendChild(clauseTd);
+
+            const updatedTd = document.createElement("td");
+            updatedTd.textContent = formatAdminDate(doc.updated_at || doc.created_at);
+            tr.appendChild(updatedTd);
+
+            els.kbTbody.appendChild(tr);
+        });
+    }
+
+    function renderKbTasks() {
+        els.kbTaskSection.classList.toggle("hidden", !state.kbTasks.length);
+        els.kbTaskList.replaceChildren();
+        const statusLabels = { pending: "排队中", running: "处理中", done: "已完成", failed: "失败" };
+
+        state.kbTasks.forEach((task) => {
+            const card = document.createElement("div");
+            card.className = "kb-task kb-task-" + (task.status || "pending");
+
+            const head = document.createElement("div");
+            head.className = "kb-task-head";
+
+            const name = document.createElement("span");
+            name.className = "kb-task-name";
+            name.textContent = task.name || task.id;
+            name.title = task.name || task.id;
+
+            const badge = document.createElement("span");
+            badge.className = "kb-task-status " + (task.status || "pending");
+            badge.textContent = statusLabels[task.status] || task.status || "未知";
+
+            head.append(name, badge);
+            card.appendChild(head);
+
+            const result = task.result;
+            if (result && typeof result === "object") {
+                const parts = [];
+                if (result.documents !== undefined) parts.push("文档 " + result.documents);
+                if (result.clauses !== undefined) parts.push("条款 " + result.clauses);
+                if (result.rules !== undefined) parts.push("规则 " + result.rules);
+                if (result.chroma_count !== undefined) parts.push("向量 " + result.chroma_count);
+                if (parts.length) {
+                    const summary = document.createElement("div");
+                    summary.className = "kb-task-summary";
+                    summary.textContent = parts.join(" · ");
+                    card.appendChild(summary);
+                }
+
+                const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+                if (warnings.length) {
+                    const warn = document.createElement("div");
+                    warn.className = "kb-task-warn";
+                    warn.textContent = "警告：" + warnings.slice(0, 3).join("；") + (warnings.length > 3 ? "；…" : "");
+                    card.appendChild(warn);
+                }
+            }
+            if (task.error) {
+                const error = document.createElement("div");
+                error.className = "kb-task-error";
+                error.textContent = task.error;
+                card.appendChild(error);
+            }
+            els.kbTaskList.appendChild(card);
+        });
+    }
+
+    function trackKbTask(info) {
+        const task = {
+            id: info.id,
+            name: info.name,
+            kind: info.kind || "upload",
+            status: "pending",
+            result: null,
+            error: null,
+            pollFailures: 0,
+            timer: null,
+        };
+        state.kbTasks.unshift(task);
+        renderKbTasks();
+        pollKbTask(task);
+        return task;
+    }
+
+    async function pollKbTask(task) {
+        if (!task || task.status === "done" || task.status === "failed") return;
+        if (task.timer) {
+            window.clearTimeout(task.timer);
+            task.timer = null;
+        }
+        try {
+            const response = await fetch("/api/kb/tasks/" + encodeURIComponent(task.id), { headers: authHeaders() });
+            if (response.status === 401) {
+                handleAuthError(401, "登录已失效，请重新登录");
+                return;
+            }
+            if (response.status === 403) {
+                task.status = "failed";
+                task.error = "权限不足：仅管理员可查看入库任务";
+                renderKbTasks();
+                return;
+            }
+            if (!response.ok) {
+                let detail = "HTTP " + response.status;
+                try {
+                    const payload = await response.json();
+                    if (payload && payload.detail) detail = payload.detail;
+                } catch (err) { /* ignore */ }
+                if (response.status === 404) {
+                    task.status = "failed";
+                    task.error = "任务不存在（服务可能已重启）";
+                    renderKbTasks();
+                    return;
+                }
+                throw new Error(detail);
+            }
+            const payload = await response.json();
+            task.status = String(payload.status || task.status);
+            task.result = payload.result || null;
+            task.error = payload.error || null;
+            task.pollFailures = 0;
+            renderKbTasks();
+
+            if (task.status === "done" || task.status === "failed") {
+                if (task.status === "done") loadKbDocs();
+                return;
+            }
+        } catch (err) {
+            task.pollFailures = (task.pollFailures || 0) + 1;
+            if (task.pollFailures >= 20) {
+                task.status = "failed";
+                task.error = "无法获取任务状态：" + (err && err.message ? err.message : err);
+                renderKbTasks();
+                return;
+            }
+        }
+        task.timer = window.setTimeout(() => pollKbTask(task), 1500);
+    }
+
+    async function uploadKbFile(file) {
+        const form = new FormData();
+        form.append("file", file, file.name);
+        const response = await fetch("/api/kb/upload", {
+            method: "POST",
+            headers: authHeaders(),
+            body: form,
+        });
+        if (!response.ok) {
+            let detail = "HTTP " + response.status;
+            try {
+                const payload = await response.json();
+                if (payload && payload.detail) {
+                    detail = typeof payload.detail === "string" ? payload.detail : stringifyValue(payload.detail);
+                }
+            } catch (err) { /* ignore */ }
+            if (response.status === 401) handleAuthError(401, detail);
+            throw new Error(detail);
+        }
+        const payload = await response.json();
+        if (!payload || !payload.task_id) throw new Error("服务端未返回 task_id");
+        trackKbTask({ id: payload.task_id, name: file.name, kind: "upload" });
+        setKbNotice("已上传「" + file.name + "」，正在自动入库…", true);
+    }
+
+    async function uploadKbFiles(fileList) {
+        const perms = kbPermissions();
+        if (!perms.manage) {
+            setKbNotice("仅管理员可上传文档");
+            return;
+        }
+        const files = Array.from(fileList || []);
+        if (!files.length) return;
+        setKbNotice("");
+        for (const file of files) {
+            const lower = String(file.name || "").toLowerCase();
+            if (!KB_ACCEPTED.some((suffix) => lower.endsWith(suffix))) {
+                setKbNotice("已跳过不支持的文件：" + file.name);
+                continue;
+            }
+            try {
+                await uploadKbFile(file);
+            } catch (err) {
+                setKbNotice("上传「" + file.name + "」失败：" + (err && err.message ? err.message : err));
+            }
+        }
+        els.kbFileInput.value = "";
+    }
+
+    async function reindexKb() {
+        const perms = kbPermissions();
+        if (!perms.manage) return;
+        if (!window.confirm("重建索引会重新扫描 data/docs 与已上传文件并重新生成向量索引，可能耗时较长，确定继续？")) {
+            return;
+        }
+        setKbNotice("");
+        try {
+            const response = await fetch("/api/kb/reindex", { method: "POST", headers: authHeaders() });
+            if (!response.ok) {
+                let detail = "HTTP " + response.status;
+                try {
+                    const payload = await response.json();
+                    if (payload && payload.detail) detail = payload.detail;
+                } catch (err) { /* ignore */ }
+                if (response.status === 401) handleAuthError(401, detail);
+                throw new Error(detail);
+            }
+            const payload = await response.json();
+            if (!payload || !payload.task_id) throw new Error("服务端未返回 task_id");
+            trackKbTask({ id: payload.task_id, name: "全量重建索引", kind: "reindex" });
+            setKbNotice("已提交重建索引任务，正在后台处理…", true);
+        } catch (err) {
+            setKbNotice("提交重建索引失败：" + (err && err.message ? err.message : err));
+        }
+    }
+
+    function bindKbUpload() {
+        els.kbFileInput.addEventListener("change", () => uploadKbFiles(els.kbFileInput.files));
+        ["dragenter", "dragover"].forEach((name) => {
+            els.kbDropzone.addEventListener(name, (event) => {
+                event.preventDefault();
+                els.kbDropzone.classList.add("dragging");
+            });
+        });
+        ["dragleave", "dragend", "drop"].forEach((name) => {
+            els.kbDropzone.addEventListener(name, (event) => {
+                event.preventDefault();
+                els.kbDropzone.classList.remove("dragging");
+            });
+        });
+        els.kbDropzone.addEventListener("drop", (event) => {
+            const files = event.dataTransfer && event.dataTransfer.files;
+            if (files && files.length) uploadKbFiles(files);
+        });
     }
 
     // ---------------------------------------------------------------- 消息渲染
@@ -1235,6 +1620,16 @@
     });
     els.adminRefresh.addEventListener("click", loadAdminUsers);
 
+    // 文档入库面板
+    els.kbBtn.addEventListener("click", openKb);
+    els.kbClose.addEventListener("click", () => els.kbOverlay.classList.add("hidden"));
+    els.kbOverlay.addEventListener("click", (event) => {
+        if (event.target === els.kbOverlay) els.kbOverlay.classList.add("hidden");
+    });
+    els.kbRefresh.addEventListener("click", loadKbDocs);
+    els.kbReindex.addEventListener("click", reindexKb);
+    bindKbUpload();
+
     els.sendBtn.addEventListener("click", () => sendQuestion());
 
     els.input.addEventListener("keydown", (event) => {
@@ -1276,6 +1671,7 @@
         if (event.key !== "Escape") return;
         if (!els.modalOverlay.classList.contains("hidden")) closeModal();
         if (!els.adminOverlay.classList.contains("hidden")) els.adminOverlay.classList.add("hidden");
+        if (!els.kbOverlay.classList.contains("hidden")) els.kbOverlay.classList.add("hidden");
     });
 
     // ---------------------------------------------------------------- 启动

@@ -24,7 +24,7 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session as OrmSession
@@ -360,6 +360,40 @@ class MySQLStore:
         with self._session_scope() as session:
             entity = session.get(Document, doc_id)
             return _document_to_dict(entity) if entity is not None else None
+
+    def list_documents_with_counts(
+        self, active_only: bool = False
+    ) -> list[dict]:
+        """文档列表 + 每份文档的条款数（入库管理面板用）。
+
+        与 list_documents 分开查询再在 Python 侧合并：文档量级很小，避免
+        ONLY_FULL_GROUP_BY 下按全部列 GROUP BY 的兼容性问题。
+        """
+        with self._session_scope() as session:
+            stmt = select(Document).order_by(
+                Document.effective_date.desc(),
+                Document.title.asc(),
+                Document.id.asc(),
+            )
+            if active_only:
+                stmt = stmt.where(Document.status == "active")
+            documents = [
+                _document_to_dict(row)
+                for row in session.execute(stmt).scalars().all()
+            ]
+
+            count_stmt = (
+                select(Clause.doc_id, func.count(Clause.id))
+                .group_by(Clause.doc_id)
+            )
+            counts = {
+                str(doc_id): int(count)
+                for doc_id, count in session.execute(count_stmt).all()
+            }
+
+        for document in documents:
+            document["clause_count"] = counts.get(str(document.get("id")), 0)
+        return documents
 
     # ---------------------------------------------------------------- 条款
 

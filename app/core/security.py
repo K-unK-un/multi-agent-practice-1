@@ -153,3 +153,20 @@ async def require_admin(
     if current_user.get("role") != "admin":
         raise _forbidden("需要管理员权限")
     return current_user
+
+
+async def require_kb_viewer(
+    current_user: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    """知识库只读依赖：管理员或 4 级用户可查看文档列表。
+
+    4 级用户仅拥有“查看”权限，上传 / 重建等写操作仍由 require_admin 把关。
+    """
+    is_admin = current_user.get("role") == "admin"
+    try:
+        level = int(current_user.get("level") or 1)
+    except (TypeError, ValueError):
+        level = 1
+    if not is_admin and level < 4:
+        raise _forbidden("需要管理员或四级用户权限")
+    return current_user

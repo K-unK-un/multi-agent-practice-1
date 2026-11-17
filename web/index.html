@@ -55,6 +55,7 @@
             <div class="header-right">
                 <span class="status-pill">多 Agent · RAG</span>
                 <div class="user-area" id="userArea">
+                    <button type="button" class="admin-btn hidden" id="kbBtn">文档入库</button>
                     <button type="button" class="admin-btn hidden" id="adminBtn">用户管理</button>
                     <span class="level-badge" id="levelBadge" title="信息层级">Lv.1</span>
                     <span class="user-name" id="userName">未登录</span>
@@ -211,6 +212,63 @@
             </table>
         </div>
         <p class="admin-hint">管理员等级恒为 4 级（不可修改）。禁用后该用户无法登录。</p>
+    </div>
+</div>
+
+<!-- 知识库：文档入库（管理员可操作，四级用户只读） -->
+<div class="modal-overlay hidden" id="kbOverlay">
+    <div class="modal admin-modal kb-modal" role="dialog" aria-modal="true" aria-labelledby="kbTitle">
+        <button type="button" class="modal-close" id="kbClose" aria-label="关闭">×</button>
+        <div class="admin-head">
+            <div>
+                <h3 id="kbTitle">文档入库</h3>
+                <p class="admin-sub" id="kbSub">上传制度文档后自动解析、切分并入库。仅管理员与四级用户可见。</p>
+            </div>
+            <div class="kb-head-actions">
+                <button type="button" class="admin-refresh" id="kbRefresh">刷新列表</button>
+                <button type="button" class="admin-refresh kb-reindex-btn" id="kbReindex">重建索引</button>
+            </div>
+        </div>
+
+        <section class="kb-upload" id="kbUploadArea">
+            <label class="kb-dropzone" id="kbDropzone" for="kbFileInput">
+                <input type="file" id="kbFileInput" accept=".pdf,.docx,.md,.txt" multiple hidden>
+                <span class="kb-drop-title">点击选择或拖拽文件到此处</span>
+                <span class="kb-drop-hint">支持 PDF / DOCX / MD / TXT；上传后自动解析入库</span>
+            </label>
+        </section>
+
+        <div class="admin-error hidden" id="kbError"></div>
+
+        <section class="kb-tasks hidden" id="kbTaskSection">
+            <div class="kb-section-head">
+                <h4>入库任务</h4>
+                <span class="kb-section-hint">任务状态保存在本机内存，服务重启后清空</span>
+            </div>
+            <div class="kb-task-list" id="kbTaskList"></div>
+        </section>
+
+        <section class="kb-docs">
+            <div class="kb-section-head">
+                <h4>已入库文档</h4>
+                <span class="kb-doc-stats" id="kbDocStats"></span>
+            </div>
+            <div class="admin-table-wrap kb-table-wrap">
+                <table class="admin-table kb-table">
+                    <thead>
+                    <tr>
+                        <th>标题</th><th>版本</th><th>生效日期</th><th>状态</th>
+                        <th>可见范围</th><th>条款数</th><th>更新时间</th>
+                    </tr>
+                    </thead>
+                    <tbody id="kbTbody">
+                    <tr><td colspan="7" class="admin-empty">加载中…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <p class="admin-hint" id="kbHint">管理员可上传文档与重建索引；四级用户仅可查看。</p>
     </div>
 </div>
 
