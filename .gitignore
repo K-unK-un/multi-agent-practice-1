@@ -27,3 +27,5 @@ eval/reports/*
 
 # 运行环境
 environment.txt
+
+test.txt
