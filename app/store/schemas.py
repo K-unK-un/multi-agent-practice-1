@@ -34,7 +34,9 @@ class Document(Base):
     status = Column(String(16), default="active", index=True)  # active | archived
     scope = Column(JSON, default=list)  # ["employee"] / ["manager"] 等
     source_path = Column(String(512))
+    source_name = Column(String(255))  # 原始文件名（去掉上传随机前缀），便于展示与审计
     checksum = Column(String(64))  # 文件内容 hash，用于变更检测
+    content_fingerprint = Column(String(64), index=True)  # 清洗后正文 hash，用于内容级判重
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
@@ -128,3 +130,36 @@ class User(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     last_login_at = Column(DateTime)
+
+
+class IngestRecord(Base):
+    """入库台账：每次上传 / 重建中的每份文档一条，记录 doc_id、来源、操作人、时间与动作。
+
+    action 取值：
+    - create：首次入库
+    - overwrite：同一 doc_id 重新入库且内容发生变化
+    - reingest_unchanged：同一 doc_id 重新入库且内容未变化
+    - upgrade：同制度新版本入库，旧版本已归档
+    - older_archived：晚到的旧版本，本次以 archived 状态入库
+    - failed：解析 / 入库失败（doc_id 可能为空）
+    """
+
+    __tablename__ = "ingest_records"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(String(64), index=True)
+    task_kind = Column(String(16), default="upload", index=True)  # upload | reindex | cli
+    doc_id = Column(String(64), index=True)
+    title = Column(String(255))
+    version = Column(String(64))
+    effective_date = Column(Date)
+    action = Column(String(32), index=True)
+    ok = Column(Boolean, default=True, index=True)
+    document_status = Column(String(16))  # active | archived
+    source_name = Column(String(255))
+    source_path = Column(String(512))
+    checksum = Column(String(64), index=True)
+    content_fingerprint = Column(String(64), index=True)
+    operator_id = Column(Integer)
+    operator_name = Column(String(64))
+    warnings = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), index=True)

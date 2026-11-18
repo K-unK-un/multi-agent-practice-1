@@ -55,6 +55,26 @@ def _file_checksum(path: Path) -> str:
     return digest.hexdigest()
 
 
+# kb API 上传落盘名：{uuid4().hex[:12]}_{原文件名}
+_UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{12}_")
+
+
+def _source_name(file_path: str) -> str:
+    """展示/审计用原始文件名：去掉上传时加的随机 uuid 前缀（截断到 255）。"""
+    name = _UPLOAD_PREFIX_RE.sub("", Path(str(file_path or "")).name)
+    return name[:255]
+
+
+def _content_fingerprint(text: str) -> str:
+    """正文内容指纹：去掉全部空白后做 SHA1。
+
+    与文件 checksum 的区别：checksum 识别“字节完全相同的文件”；
+    content_fingerprint 识别“重新导出/换格式但正文相同的文件”。
+    """
+    normalized = re.sub(r"\s+", "", text or "")
+    return _sha1(normalized) if normalized else ""
+
+
 def _doc_field(document, key: str):
     """兼容 list_documents() 返回 dict 或 ORM 对象。"""
     if isinstance(document, dict):
@@ -139,7 +159,10 @@ def build_doc_meta(file_path: str, scope: list[str]) -> dict:
         "status": "active",
         "scope": list(scope),
         "source_path": str(path.resolve()),
+        "source_name": _source_name(file_path),
         "checksum": checksum,
+        "content_fingerprint": None,  # 清洗完成后由 run_ingest 填入
+        "ingested_at": _now_iso(),
     }
 
 
@@ -185,19 +208,24 @@ def _is_newer(new_meta: dict, old_document) -> bool:
     return True
 
 
-def _archive_old_versions(mysql, new_meta: dict, warnings: list[str]) -> bool:
+def _archive_old_versions(
+    mysql, new_meta: dict, warnings: list[str]
+) -> tuple[bool, list[str]]:
     """同 title 的 active 旧版本置 archived（只归档，不删除）。
 
-    返回 True 表示库中已存在更新的同制度版本，本次上传属于历史版本，
-    调用方应把新行直接标记为 archived，避免出现多个 active 版本。
+    返回 ``(incoming_is_older, archived_ids)``：
+    - incoming_is_older=True 表示库中已存在更新的同制度版本，本次上传属于历史版本，
+      调用方应把新行直接标记为 archived，避免出现多个 active 版本；
+    - archived_ids 是本次成功归档的旧版本文档 id，供入库台账记录动作。
     """
     title = new_meta["title"]
     new_doc_id = new_meta["doc_id"]
+    archived_ids: list[str] = []
     try:
         documents = list(mysql.list_documents() or [])
     except Exception as exc:
         warnings.append(f"读取文档列表失败，跳过版本归档: {exc}")
-        return False
+        return False, archived_ids
 
     incoming_is_older = False
     for document in documents:
@@ -217,6 +245,8 @@ def _archive_old_versions(mysql, new_meta: dict, warnings: list[str]) -> bool:
             continue
         try:
             mysql.archive_document(old_id)
+            archived_ids.append(str(old_id))
+            warnings.append(f"同制度旧版本已归档: doc_id={old_id}")
             logger.info("归档旧版本: title=%s doc_id=%s", title, old_id)
             # 同步向量元数据，避免旧版条款仍被 status=active 的 where 过滤命中
             try:
@@ -227,7 +257,7 @@ def _archive_old_versions(mysql, new_meta: dict, warnings: list[str]) -> bool:
                 warnings.append(f"同步旧版本向量状态失败 doc_id={old_id}: {exc}")
         except Exception as exc:
             warnings.append(f"归档旧版本失败 doc_id={old_id}: {exc}")
-    return incoming_is_older
+    return incoming_is_older, archived_ids
 
 
 # ---------------------------------------------------------------- 向量索引
@@ -374,6 +404,11 @@ def _index_children(
                 "status": status,
                 "effective_date": effective_date_str,
                 "scope": scope_value,
+                # 入库审计信息（不影响检索过滤，仅供追溯与判重）
+                "version": str(doc_meta.get("version") or ""),
+                "source_name": str(doc_meta.get("source_name") or ""),
+                "content_fingerprint": str(doc_meta.get("content_fingerprint") or ""),
+                "ingested_at": str(doc_meta.get("ingested_at") or ""),
             }
             for block in batch
         ]
@@ -409,12 +444,61 @@ def _rebuild_bm25(mysql, warnings: list[str]) -> None:
         warnings.append(f"BM25 重建失败: {exc}")
 
 
+# ---------------------------------------------------------------- 入库台账
+
+def _record_ingest(
+    mysql,
+    *,
+    task_id: str | None,
+    task_kind: str,
+    operator: dict | None,
+    file_path: str,
+    meta: dict | None,
+    action: str,
+    ok: bool,
+    document_status: str | None,
+    warnings: list[str],
+) -> None:
+    """写入一条入库台账（失败不影响主流程）。"""
+    if mysql is None:
+        return
+    operator = operator or {}
+    record = {
+        "task_id": task_id,
+        "task_kind": task_kind or "cli",
+        "doc_id": (meta or {}).get("doc_id"),
+        "title": (meta or {}).get("title"),
+        "version": (meta or {}).get("version"),
+        "effective_date": (meta or {}).get("effective_date"),
+        "action": action,
+        "ok": bool(ok),
+        "document_status": document_status,
+        "source_name": (meta or {}).get("source_name") or _source_name(file_path),
+        "source_path": str(Path(file_path).resolve()) if file_path else None,
+        "checksum": (meta or {}).get("checksum"),
+        "content_fingerprint": (meta or {}).get("content_fingerprint"),
+        "operator_id": operator.get("id"),
+        "operator_name": operator.get("username") or "cli",
+        "warnings": list(warnings or []),
+    }
+    try:
+        mysql.insert_ingest_record(record)
+    except Exception:
+        logger.warning(
+            "写入入库台账失败 file=%s action=%s", file_path, action, exc_info=True
+        )
+
+
 # ---------------------------------------------------------------- 主入口
 
 def run_ingest(
     file_paths: list[str],
     scope: list[str] | None = None,
     with_rules: bool = True,
+    *,
+    task_id: str | None = None,
+    task_kind: str = "cli",
+    operator: dict | None = None,
 ) -> dict:
     """批量建库。返回 {documents, clauses, rules, chroma_count, warnings}。"""
     warnings: list[str] = []
@@ -433,12 +517,19 @@ def run_ingest(
 
     for file_path in file_paths or []:
         name = Path(file_path).name
+        warn_start = len(warnings)
+        meta: dict | None = None
 
         # 1) 解析
         try:
             parsed = load_document(file_path)
         except Exception as exc:
             warnings.append(f"[{name}] 解析失败: {exc}")
+            _record_ingest(
+                mysql, task_id=task_id, task_kind=task_kind, operator=operator,
+                file_path=file_path, meta=None, action="failed", ok=False,
+                document_status=None, warnings=warnings[warn_start:],
+            )
             continue
 
         # 2) 元数据（先于切分构建：用清洗后的制度名做文首标题去噪）
@@ -446,6 +537,11 @@ def run_ingest(
             meta = build_doc_meta(file_path, scope_list)
         except Exception as exc:
             warnings.append(f"[{name}] 元数据提取失败: {exc}")
+            _record_ingest(
+                mysql, task_id=task_id, task_kind=task_kind, operator=operator,
+                file_path=file_path, meta=None, action="failed", ok=False,
+                document_status=None, warnings=warnings[warn_start:],
+            )
             continue
 
         # 3) 清洗（保留页码）
@@ -456,11 +552,24 @@ def run_ingest(
             )
         except Exception as exc:
             warnings.append(f"[{name}] 清洗失败: {exc}")
+            _record_ingest(
+                mysql, task_id=task_id, task_kind=task_kind, operator=operator,
+                file_path=file_path, meta=meta, action="failed", ok=False,
+                document_status=None, warnings=warnings[warn_start:],
+            )
             continue
 
         if not cleaned_full.strip():
             warnings.append(f"[{name}] 清洗后无有效文本，跳过")
+            _record_ingest(
+                mysql, task_id=task_id, task_kind=task_kind, operator=operator,
+                file_path=file_path, meta=meta, action="failed", ok=False,
+                document_status=None, warnings=warnings[warn_start:],
+            )
             continue
+
+        # 3.1) 正文内容指纹：用于识别“换文件名/重新导出但内容相同”的重复文档
+        meta["content_fingerprint"] = _content_fingerprint(cleaned_full)
 
         parsed_clean = ParsedDoc(
             title=meta["title"],  # 去掉上传随机前缀/版本号后的制度名
@@ -474,9 +583,19 @@ def run_ingest(
             parents, children = split_clauses(parsed_clean, meta)
         except Exception as exc:
             warnings.append(f"[{name}] 条款切分失败: {exc}")
+            _record_ingest(
+                mysql, task_id=task_id, task_kind=task_kind, operator=operator,
+                file_path=file_path, meta=meta, action="failed", ok=False,
+                document_status=None, warnings=warnings[warn_start:],
+            )
             continue
         if not parents:
             warnings.append(f"[{name}] 未切出任何条款，跳过")
+            _record_ingest(
+                mysql, task_id=task_id, task_kind=task_kind, operator=operator,
+                file_path=file_path, meta=meta, action="failed", ok=False,
+                document_status=None, warnings=warnings[warn_start:],
+            )
             continue
 
         doc_ok = False
@@ -484,8 +603,30 @@ def run_ingest(
             warnings.append(f"[{name}] MySQL 不可用，跳过入库与向量索引")
             continue
 
+        # 4.1) 查重 / 冲突识别（只记录并告警，不阻断入库）
+        existing = None
+        try:
+            existing = mysql.get_document(meta["doc_id"])
+        except Exception as exc:
+            warnings.append(f"[{name}] 查询既有文档失败: {exc}")
+
+        if meta["content_fingerprint"]:
+            try:
+                duplicates = mysql.find_documents_by_fingerprint(
+                    meta["content_fingerprint"], exclude_id=meta["doc_id"]
+                ) or []
+            except Exception as exc:
+                warnings.append(f"[{name}] 内容指纹查重失败: {exc}")
+                duplicates = []
+            if duplicates:
+                preview = "、".join(
+                    f"{_doc_field(doc, 'title') or '未命名'}({_doc_field(doc, 'id')})"
+                    for doc in duplicates[:3]
+                )
+                warnings.append(f"[{name}] 检测到相同内容的其他文档: {preview}")
+
         # 5) 版本管理 + 文档入库
-        incoming_is_older = _archive_old_versions(mysql, meta, warnings)
+        incoming_is_older, archived_ids = _archive_old_versions(mysql, meta, warnings)
         doc_row = {
             "id": meta["id"],
             "title": meta["title"],
@@ -495,7 +636,9 @@ def run_ingest(
             "status": "archived" if incoming_is_older else "active",
             "scope": meta["scope"],
             "source_path": meta["source_path"],
+            "source_name": meta["source_name"],
             "checksum": meta["checksum"],
+            "content_fingerprint": meta["content_fingerprint"],
         }
         if incoming_is_older:
             meta["status"] = "archived"
@@ -509,6 +652,11 @@ def run_ingest(
             warnings.append(f"[{name}] 文档元数据入库失败: {exc}")
 
         if not doc_ok:
+            _record_ingest(
+                mysql, task_id=task_id, task_kind=task_kind, operator=operator,
+                file_path=file_path, meta=meta, action="failed", ok=False,
+                document_status=None, warnings=warnings[warn_start:],
+            )
             continue
 
         # 6) 条款入库
@@ -517,6 +665,11 @@ def run_ingest(
             clause_count += len(parents)
         except Exception as exc:
             warnings.append(f"[{name}] 条款入库失败，跳过向量索引: {exc}")
+            _record_ingest(
+                mysql, task_id=task_id, task_kind=task_kind, operator=operator,
+                file_path=file_path, meta=meta, action="failed", ok=False,
+                document_status=meta.get("status"), warnings=warnings[warn_start:],
+            )
             continue
 
         # 7) 子块向量索引（先按 doc_id 清理旧向量，实现"重新上传即覆盖"）
@@ -528,6 +681,30 @@ def run_ingest(
             len(parents),
             len(children),
             indexed,
+        )
+
+        # 7.1) 判定动作并写入入库台账
+        if existing is not None:
+            same_content = (
+                bool(existing.get("checksum"))
+                and existing.get("checksum") == meta.get("checksum")
+            ) or (
+                bool(existing.get("content_fingerprint"))
+                and existing.get("content_fingerprint")
+                == meta.get("content_fingerprint")
+            )
+            action = "reingest_unchanged" if same_content else "overwrite"
+        elif incoming_is_older:
+            action = "older_archived"
+        elif archived_ids:
+            action = "upgrade"
+        else:
+            action = "create"
+
+        _record_ingest(
+            mysql, task_id=task_id, task_kind=task_kind, operator=operator,
+            file_path=file_path, meta=meta, action=action, ok=True,
+            document_status=meta.get("status"), warnings=warnings[warn_start:],
         )
         all_parents.extend(parents)
 
@@ -572,7 +749,13 @@ def run_ingest(
     return result
 
 
-def rebuild_all(data_dir: str = "data/docs") -> dict:
+def rebuild_all(
+    data_dir: str = "data/docs",
+    *,
+    task_id: str | None = None,
+    task_kind: str = "reindex",
+    operator: dict | None = None,
+) -> dict:
     """遍历目录下所有受支持文档并全量重建索引。空目录返回提示。"""
     root = Path(data_dir)
     files: list[str] = []
@@ -588,4 +771,6 @@ def rebuild_all(data_dir: str = "data/docs") -> dict:
         logger.warning("知识库目录为空或不存在: %s", root)
         return {"documents": 0, "warnings": ["目录为空"]}
 
-    return run_ingest(files)
+    return run_ingest(
+        files, task_id=task_id, task_kind=task_kind, operator=operator
+    )

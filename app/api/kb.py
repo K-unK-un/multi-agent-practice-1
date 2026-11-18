@@ -80,7 +80,7 @@ def _source_name(source_path: Any) -> str:
     return _UPLOAD_PREFIX_RE.sub("", name)
 
 
-def _ingest_worker(task_id: str, path: str) -> None:
+def _ingest_worker(task_id: str, path: str, operator: dict[str, Any]) -> None:
     """后台建库任务：pending → running → done/failed，状态写回任务注册表。
 
     等待串行锁期间保持 pending，前端显示为“排队中”。
@@ -88,7 +88,12 @@ def _ingest_worker(task_id: str, path: str) -> None:
     try:
         with _INGEST_LOCK:
             update_task(task_id, status="running")
-            result = run_ingest([path])
+            result = run_ingest(
+                [path],
+                task_id=task_id,
+                task_kind="upload",
+                operator=operator,
+            )
         update_task(task_id, status="done", result=_json_safe(result))
         logger.info("文档建库完成 task_id=%s path=%s", task_id, path)
     except Exception as exc:
@@ -99,12 +104,16 @@ def _ingest_worker(task_id: str, path: str) -> None:
             logger.exception("更新任务失败状态出错 task_id=%s", task_id)
 
 
-def _reindex_worker(task_id: str) -> None:
+def _reindex_worker(task_id: str, operator: dict[str, Any]) -> None:
     """后台全量重建索引任务：data/docs 全量扫描 + data/uploads 上传文件补扫。"""
     try:
         with _INGEST_LOCK:
             update_task(task_id, status="running")
-            result = rebuild_all()
+            result = rebuild_all(
+                task_id=task_id,
+                task_kind="reindex",
+                operator=operator,
+            )
             upload_dir = Path(settings.upload_dir)
             upload_files = (
                 sorted(
@@ -115,7 +124,12 @@ def _reindex_worker(task_id: str) -> None:
                 else []
             )
             if upload_files:
-                extra = run_ingest([str(f) for f in upload_files])
+                extra = run_ingest(
+                    [str(f) for f in upload_files],
+                    task_id=task_id,
+                    task_kind="reindex",
+                    operator=operator,
+                )
                 for key in ("documents", "clauses", "rules"):
                     result[key] = result.get(key, 0) + extra.get(key, 0)
                 result.setdefault("warnings", []).extend(extra.get("warnings", []))
@@ -198,8 +212,15 @@ async def upload_document(
             detail="文件内容为空",
         )
 
-    task_id = create_task("upload", {"path": str(dest), "filename": safe_name})
-    background_tasks.add_task(_ingest_worker, task_id, str(dest))
+    task_id = create_task(
+        "upload",
+        {
+            "path": str(dest),
+            "filename": safe_name,
+            "operator": admin.get("username"),
+        },
+    )
+    background_tasks.add_task(_ingest_worker, task_id, str(dest), admin)
     logger.info(
         "上传完成，已提交建库任务 task_id=%s file=%s size=%d admin=%s",
         task_id, stored_name, size, admin.get("username"),
@@ -238,8 +259,8 @@ def reindex(
     admin: dict[str, Any] = Depends(require_admin),
 ) -> dict[str, str]:
     """提交全量重建索引任务（走同一任务注册表）。仅管理员可用。"""
-    task_id = create_task("reindex", {})
-    background_tasks.add_task(_reindex_worker, task_id)
+    task_id = create_task("reindex", {"operator": admin.get("username")})
+    background_tasks.add_task(_reindex_worker, task_id, admin)
     logger.info("已提交重建索引任务 task_id=%s admin=%s", task_id, admin.get("username"))
     return {"task_id": task_id}
 
@@ -268,15 +289,41 @@ def list_documents(
         documents.append(
             {
                 "id": _field(row, "id"),
+                "doc_id": _field(row, "id"),
                 "title": _field(row, "title") or "",
                 "version": _field(row, "version"),
                 "effective_date": str(effective_date) if effective_date is not None else None,
                 "status": _field(row, "status") or "active",
                 "scope": list(_field(row, "scope") or []),
                 "clause_count": int(_field(row, "clause_count") or 0),
-                "source_name": _source_name(_field(row, "source_path")),
+                # 新入库会写 source_name；历史数据回退到从 source_path 推导
+                "source_name": _field(row, "source_name")
+                or _source_name(_field(row, "source_path")),
+                "content_fingerprint": _field(row, "content_fingerprint"),
                 "created_at": _field(row, "created_at"),
                 "updated_at": _field(row, "updated_at"),
             }
         )
     return documents
+
+
+@router.get("/ingest-records")
+def list_ingest_records(
+    limit: int = 100,
+    doc_id: str | None = None,
+    viewer: dict[str, Any] = Depends(require_kb_viewer),
+) -> list[dict[str, Any]]:
+    """入库台账：每份文档的 doc_id、来源、操作人、时间与动作。管理员与 4 级用户可查看。"""
+    try:
+        size = max(1, min(int(limit or 100), 500))
+    except (TypeError, ValueError):
+        size = 100
+    try:
+        rows = get_mysql().list_ingest_records(limit=size, doc_id=doc_id) or []
+    except Exception:
+        logger.exception("查询入库记录失败")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="查询入库记录失败",
+        )
+    return [_json_safe(row) for row in rows]

@@ -1704,6 +1704,100 @@ textarea {
     background: #f2f4f7;
 }
 
+/* 文档列表 / 入库记录切换 */
+.kb-tabs {
+    display: flex;
+    gap: 4px;
+    margin: 2px 0 12px;
+    border-bottom: 1px solid #eaecf0;
+}
+
+.kb-tab {
+    padding: 8px 14px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: #667085;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.kb-tab:hover {
+    color: #4f6ef7;
+}
+
+.kb-tab.active {
+    color: #4f6ef7;
+    border-bottom-color: #4f6ef7;
+}
+
+.kb-record-time,
+.kb-record-id {
+    color: #667085;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    white-space: nowrap;
+}
+
+.kb-record-source {
+    max-width: 180px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.kb-record-note {
+    max-width: 260px;
+    color: #667085;
+    font-size: 12px;
+    word-break: break-word;
+}
+
+.kb-action {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.kb-action-create {
+    color: #027a48;
+    background: #ecfdf3;
+}
+
+.kb-action-overwrite {
+    color: #b54708;
+    background: #fffaeb;
+}
+
+.kb-action-unchanged {
+    color: #475467;
+    background: #eef2f6;
+}
+
+.kb-action-upgrade {
+    color: #1d4ed8;
+    background: #e0ecff;
+}
+
+.kb-action-archived {
+    color: #667085;
+    background: #f2f4f7;
+}
+
+.kb-action-failed {
+    color: #b42318;
+    background: #fef3f2;
+}
+
+.kb-action-other {
+    color: #475467;
+    background: #eef2f6;
+}
+
 /* 窄屏：用户栏收窄 */
 @media (max-width: 760px) {
     .header-right {

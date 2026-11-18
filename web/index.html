@@ -248,7 +248,14 @@
             <div class="kb-task-list" id="kbTaskList"></div>
         </section>
 
-        <section class="kb-docs">
+        <div class="kb-tabs" role="tablist" aria-label="知识库视图">
+            <button type="button" class="kb-tab active" id="kbTabDocs" data-kb-tab="docs"
+                    role="tab" aria-selected="true">已入库文档</button>
+            <button type="button" class="kb-tab" id="kbTabRecords" data-kb-tab="records"
+                    role="tab" aria-selected="false">入库记录</button>
+        </div>
+
+        <section class="kb-docs" id="kbDocsSection">
             <div class="kb-section-head">
                 <h4>已入库文档</h4>
                 <span class="kb-doc-stats" id="kbDocStats"></span>
@@ -262,6 +269,26 @@
                     </tr>
                     </thead>
                     <tbody id="kbTbody">
+                    <tr><td colspan="7" class="admin-empty">加载中…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="kb-records hidden" id="kbRecordsSection">
+            <div class="kb-section-head">
+                <h4>入库记录</h4>
+                <span class="kb-doc-stats" id="kbRecordStats">最近 100 条</span>
+            </div>
+            <div class="admin-table-wrap kb-table-wrap">
+                <table class="admin-table kb-table kb-record-table">
+                    <thead>
+                    <tr>
+                        <th>时间</th><th>文档</th><th>doc_id</th><th>来源文件</th>
+                        <th>上传人</th><th>动作</th><th>说明</th>
+                    </tr>
+                    </thead>
+                    <tbody id="kbRecordsTbody">
                     <tr><td colspan="7" class="admin-empty">加载中…</td></tr>
                     </tbody>
                 </table>

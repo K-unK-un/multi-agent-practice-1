@@ -37,6 +37,7 @@ from app.store.schemas import (
     Clause,
     Document,
     Feedback,
+    IngestRecord,
     Message,
     RuleRow,
     Session as SessionRow,
@@ -55,7 +56,27 @@ _DOC_FIELDS = (
     "status",
     "scope",
     "source_path",
+    "source_name",
     "checksum",
+    "content_fingerprint",
+)
+_INGEST_FIELDS = (
+    "task_id",
+    "task_kind",
+    "doc_id",
+    "title",
+    "version",
+    "effective_date",
+    "action",
+    "ok",
+    "document_status",
+    "source_name",
+    "source_path",
+    "checksum",
+    "content_fingerprint",
+    "operator_id",
+    "operator_name",
+    "warnings",
 )
 _MESSAGE_FIELDS = (
     "session_id",
@@ -139,6 +160,20 @@ def _scope_list(value: Any) -> list[str]:
 def _row_to_dict(row: Any) -> dict:
     """ORM 行 → 普通 dict（列名取自 __table__.columns）。"""
     return {col.name: _to_jsonable(getattr(row, col.key)) for col in row.__table__.columns}
+
+
+def _ingest_record_to_dict(record: IngestRecord) -> dict:
+    """入库台账行 → dict；created_at 保留到秒，便于前端展示入库时间。"""
+    data: dict[str, Any] = {}
+    for col in record.__table__.columns:
+        value = getattr(record, col.key)
+        if isinstance(value, datetime):
+            data[col.name] = value.strftime("%Y-%m-%d %H:%M:%S")
+        elif isinstance(value, date):
+            data[col.name] = value.strftime("%Y-%m-%d")
+        else:
+            data[col.name] = value
+    return data
 
 
 def _document_to_dict(document: Document) -> dict:
@@ -282,6 +317,10 @@ class MySQLStore:
             "messages": {
                 "user_id": "INTEGER NULL",
             },
+            "documents": {
+                "source_name": "VARCHAR(255) NULL",
+                "content_fingerprint": "VARCHAR(64) NULL",
+            },
         }
         for table, columns in additions.items():
             have = columns_of(table)
@@ -394,6 +433,27 @@ class MySQLStore:
         for document in documents:
             document["clause_count"] = counts.get(str(document.get("id")), 0)
         return documents
+
+    def find_documents_by_fingerprint(
+        self, fingerprint: str, exclude_id: str | None = None
+    ) -> list[dict]:
+        """按内容指纹查重；exclude_id 用于排除当前正在入库的文档。"""
+        value = str(fingerprint or "").strip()
+        if not value:
+            return []
+        with self._session_scope() as session:
+            stmt = select(Document).where(Document.content_fingerprint == value)
+            if exclude_id:
+                stmt = stmt.where(Document.id != str(exclude_id))
+            stmt = stmt.order_by(
+                Document.effective_date.desc(),
+                Document.title.asc(),
+                Document.id.asc(),
+            )
+            return [
+                _document_to_dict(row)
+                for row in session.execute(stmt).scalars().all()
+            ]
 
     # ---------------------------------------------------------------- 条款
 
@@ -526,6 +586,35 @@ class MySQLStore:
             )
             rows = session.execute(stmt).scalars().all()
             return [_document_to_dict(row) for row in rows]
+
+    # ---------------------------------------------------------------- 入库台账
+
+    def insert_ingest_record(self, record: dict) -> int:
+        """写入一条入库记录，返回自增 id。"""
+        payload = {key: record.get(key) for key in _INGEST_FIELDS if key in record}
+        if "effective_date" in payload:
+            payload["effective_date"] = _parse_date(payload.get("effective_date"))
+        payload.setdefault("created_at", _now())
+        with self._session_scope() as session:
+            entity = IngestRecord(**payload)
+            session.add(entity)
+            session.flush()
+            return int(entity.id)
+
+    def list_ingest_records(
+        self, limit: int = 100, doc_id: str | None = None
+    ) -> list[dict]:
+        """按时间倒序返回入库记录；doc_id 可按单份文档过滤。"""
+        try:
+            size = max(1, min(int(limit or 100), 500))
+        except (TypeError, ValueError):
+            size = 100
+        with self._session_scope() as session:
+            stmt = select(IngestRecord).order_by(IngestRecord.id.desc()).limit(size)
+            if doc_id:
+                stmt = stmt.where(IngestRecord.doc_id == str(doc_id))
+            rows = session.execute(stmt).scalars().all()
+            return [_ingest_record_to_dict(row) for row in rows]
 
     # ---------------------------------------------------------------- 规则表
 

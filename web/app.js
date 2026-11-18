@@ -74,8 +74,14 @@
         kbError: $("kbError"),
         kbTaskSection: $("kbTaskSection"),
         kbTaskList: $("kbTaskList"),
+        kbTabDocs: $("kbTabDocs"),
+        kbTabRecords: $("kbTabRecords"),
+        kbDocsSection: $("kbDocsSection"),
+        kbRecordsSection: $("kbRecordsSection"),
         kbTbody: $("kbTbody"),
+        kbRecordsTbody: $("kbRecordsTbody"),
         kbDocStats: $("kbDocStats"),
+        kbRecordStats: $("kbRecordStats"),
         kbTitle: $("kbTitle"),
         kbSub: $("kbSub"),
         kbHint: $("kbHint"),
@@ -96,6 +102,8 @@
         adminUsers: [],
         kbDocs: [],
         kbTasks: [],
+        kbRecords: [],
+        kbTab: "docs",
     };
 
     // ---------------------------------------------------------------- 会话
@@ -443,6 +451,14 @@
     // ---------------------------------------------------------------- 文档入库
 
     const KB_ACCEPTED = [".pdf", ".docx", ".md", ".txt"];
+    const KB_ACTION_LABELS = {
+        create: { text: "新建", tone: "create" },
+        overwrite: { text: "覆盖更新", tone: "overwrite" },
+        reingest_unchanged: { text: "重复入库", tone: "unchanged" },
+        upgrade: { text: "版本升级", tone: "upgrade" },
+        older_archived: { text: "历史版本", tone: "archived" },
+        failed: { text: "失败", tone: "failed" },
+    };
 
     function setKbNotice(text, success) {
         els.kbError.textContent = text || "";
@@ -465,7 +481,7 @@
             : "四级用户仅可查看文档列表，无法上传或重建索引。";
         setKbNotice("");
         renderKbTasks();
-        loadKbDocs();
+        switchKbTab(state.kbTab);
     }
 
     async function loadKbDocs() {
@@ -560,6 +576,142 @@
             tr.appendChild(updatedTd);
 
             els.kbTbody.appendChild(tr);
+        });
+    }
+
+    function switchKbTab(tab) {
+        state.kbTab = tab === "records" ? "records" : "docs";
+        const docsActive = state.kbTab === "docs";
+        els.kbTabDocs.classList.toggle("active", docsActive);
+        els.kbTabRecords.classList.toggle("active", !docsActive);
+        els.kbTabDocs.setAttribute("aria-selected", docsActive ? "true" : "false");
+        els.kbTabRecords.setAttribute("aria-selected", docsActive ? "false" : "true");
+        els.kbDocsSection.classList.toggle("hidden", !docsActive);
+        els.kbRecordsSection.classList.toggle("hidden", docsActive);
+        if (docsActive) loadKbDocs();
+        else loadKbRecords();
+    }
+
+    function refreshKb() {
+        if (state.kbTab === "records") loadKbRecords();
+        else loadKbDocs();
+    }
+
+    async function loadKbRecords() {
+        els.kbRecordsTbody.replaceChildren();
+        const loading = document.createElement("tr");
+        loading.innerHTML = '<td colspan="7" class="admin-empty">加载中…</td>';
+        els.kbRecordsTbody.appendChild(loading);
+        try {
+            const response = await fetch("/api/kb/ingest-records?limit=100", { headers: authHeaders() });
+            if (!response.ok) {
+                let detail = "HTTP " + response.status;
+                try {
+                    const payload = await response.json();
+                    if (payload && payload.detail) {
+                        detail = typeof payload.detail === "string" ? payload.detail : stringifyValue(payload.detail);
+                    }
+                } catch (err) { /* ignore */ }
+                if (response.status === 401) handleAuthError(401, detail);
+                throw new Error(detail);
+            }
+            const payload = await response.json();
+            state.kbRecords = Array.isArray(payload) ? payload : [];
+            renderKbRecords();
+        } catch (err) {
+            els.kbRecordsTbody.replaceChildren();
+            const failed = document.createElement("tr");
+            failed.innerHTML = '<td colspan="7" class="admin-empty">加载失败</td>';
+            els.kbRecordsTbody.appendChild(failed);
+            els.kbRecordStats.textContent = "";
+            setKbNotice("加载入库记录失败：" + (err && err.message ? err.message : err));
+        }
+    }
+
+    function renderKbRecords() {
+        els.kbRecordsTbody.replaceChildren();
+        const records = state.kbRecords;
+        els.kbRecordStats.textContent = records.length
+            ? "最近 " + records.length + " 条"
+            : "最近 100 条";
+
+        if (!records.length) {
+            const empty = document.createElement("tr");
+            empty.innerHTML = '<td colspan="7" class="admin-empty">暂无入库记录</td>';
+            els.kbRecordsTbody.appendChild(empty);
+            return;
+        }
+
+        records.forEach((record) => {
+            const tr = document.createElement("tr");
+            if (record.ok === false) tr.classList.add("row-disabled");
+
+            const timeTd = document.createElement("td");
+            timeTd.className = "kb-record-time";
+            timeTd.textContent = record.created_at || "—";
+            tr.appendChild(timeTd);
+
+            const docTd = document.createElement("td");
+            const title = document.createElement("span");
+            title.className = "kb-doc-title";
+            title.textContent = record.title || "（未命名制度）";
+            docTd.appendChild(title);
+            const metaParts = [];
+            if (record.version) metaParts.push(record.version);
+            if (record.effective_date) metaParts.push(record.effective_date);
+            if (record.document_status) {
+                metaParts.push(record.document_status === "archived" ? "已归档" : "生效中");
+            }
+            if (metaParts.length) {
+                const meta = document.createElement("span");
+                meta.className = "kb-doc-file";
+                meta.textContent = metaParts.join(" · ");
+                docTd.appendChild(meta);
+            }
+            tr.appendChild(docTd);
+
+            const idTd = document.createElement("td");
+            idTd.className = "kb-record-id";
+            if (record.doc_id) {
+                idTd.textContent = String(record.doc_id).slice(0, 12) + "…";
+                idTd.title = String(record.doc_id);
+            } else {
+                idTd.textContent = "—";
+            }
+            tr.appendChild(idTd);
+
+            const sourceTd = document.createElement("td");
+            sourceTd.className = "kb-record-source";
+            sourceTd.textContent = record.source_name || "—";
+            if (record.source_path) sourceTd.title = record.source_path;
+            tr.appendChild(sourceTd);
+
+            const operatorTd = document.createElement("td");
+            operatorTd.textContent = record.operator_name || "—";
+            tr.appendChild(operatorTd);
+
+            const actionTd = document.createElement("td");
+            const info = KB_ACTION_LABELS[record.action]
+                || { text: record.action || "—", tone: "other" };
+            const chip = document.createElement("span");
+            chip.className = "kb-action kb-action-" + info.tone;
+            chip.textContent = info.text;
+            actionTd.appendChild(chip);
+            tr.appendChild(actionTd);
+
+            const noteTd = document.createElement("td");
+            noteTd.className = "kb-record-note";
+            const warnings = Array.isArray(record.warnings) ? record.warnings : [];
+            noteTd.textContent = warnings.length
+                ? warnings.join("；")
+                : (record.ok === false ? "入库失败" : "—");
+            if (noteTd.textContent.length > 120) {
+                noteTd.title = noteTd.textContent;
+                noteTd.textContent = noteTd.textContent.slice(0, 120) + "…";
+            }
+            tr.appendChild(noteTd);
+
+            els.kbRecordsTbody.appendChild(tr);
         });
     }
 
@@ -676,7 +828,7 @@
             renderKbTasks();
 
             if (task.status === "done" || task.status === "failed") {
-                if (task.status === "done") loadKbDocs();
+                if (!els.kbOverlay.classList.contains("hidden")) refreshKb();
                 return;
             }
         } catch (err) {
@@ -1626,8 +1778,10 @@
     els.kbOverlay.addEventListener("click", (event) => {
         if (event.target === els.kbOverlay) els.kbOverlay.classList.add("hidden");
     });
-    els.kbRefresh.addEventListener("click", loadKbDocs);
+    els.kbRefresh.addEventListener("click", refreshKb);
     els.kbReindex.addEventListener("click", reindexKb);
+    els.kbTabDocs.addEventListener("click", () => switchKbTab("docs"));
+    els.kbTabRecords.addEventListener("click", () => switchKbTab("records"));
     bindKbUpload();
 
     els.sendBtn.addEventListener("click", () => sendQuestion());
