@@ -11,7 +11,7 @@ import threading
 from app.core.config import settings
 from app.core.logger import get_logger
 from app.llm.client import get_embeddings
-from app.retrieval.filters import build_chroma_where
+from app.retrieval.filters import build_chroma_where, is_effective
 
 logger = get_logger("retrieval.vector")
 
@@ -65,6 +65,10 @@ class VectorRetriever:
         hits: list[dict] = []
         for row in rows or []:
             if not isinstance(row, dict):
+                continue
+            # Chroma 1.0 不支持字符串 effective_date 的 $lte，改在 Python 侧过滤；
+            # 未填写生效日期的条款视为不限，与 MySQL/BM25 路语义一致。
+            if not is_effective(row.get("effective_date")):
                 continue
             hit = _to_hit(row)
             if hit["doc_id"]:

@@ -15,6 +15,7 @@
 - **答案核查**：引用真实性与逐句支撑度独立核查，不通过则回退重生成或降级
 - **可控边界**：版本时效、角色权限在检索入口硬过滤；无依据时拒答
 - **前端文档入库**：管理员可在页面直接上传 PDF / DOCX / MD / TXT，自动解析、切分并写入 MySQL + Chroma + BM25；每次入库写入台账（doc_id / 来源文件 / 操作人 / 时间 / 动作），并用文件 checksum + 正文指纹识别重复与内容变更；面板实时显示任务、文档列表与入库记录（4 级用户只读可见）
+- **轻量交互**：寒暄 / 感谢 / 告别等纯闲聊直接短回复；天气、时间、新闻、娱乐、编程、数学等非制度问题也直接说明能力边界，不触发检索；只有包含制度关键词或需要制度依据的问题才走检索。最终答案默认控制在 150~500 字，专家中间稿不再流式显示
 
 ## 系统框架
 
@@ -57,7 +58,7 @@ flowchart TD
 | 后端 | Python 3.11 · FastAPI · Pydantic v2 |
 | 编排 | LangGraph（StateGraph / Command / 子图 / Checkpointer） |
 | Agent | LangChain `create_agent` |
-| 大模型 | DeepSeek `deepseek-v4-flash` / `deepseek-v4-pro` |
+| 大模型 | DeepSeek `deepseek-flash` / `deepseek-v4-pro` |
 | Embedding | nomic-embed-text（Ollama，768 维） |
 | 向量库 | Chroma |
 | 稀疏检索 | rank_bm25 + jieba |
@@ -101,14 +102,14 @@ ollama serve                  # 若未开机自启
 ollama list                   # 确认存在 nomic-embed-text
 ```
 
-精排模型从本地 HF 缓存加载，部署前设置：
+精排模型从本地 HF 缓存加载。`app/core/config.py` 会在第三方库 import 前自动把 `.env` 中的 `HF_HOME` / `HF_HUB_OFFLINE` 写入进程环境变量，无需手动 export；如需联网下载模型，把 `HF_HUB_OFFLINE` 设为 `0`。
+
+也可以手动设置（可选）：
 
 ```bash
 export HF_HOME=G:/AI
 export HF_HUB_OFFLINE=1       # 已缓存时关闭联网校验
 ```
-
-Windows 下可将这两项写入系统环境变量，避免每次手动 export。
 
 ### 4. 配置参数
 
@@ -148,11 +149,23 @@ python scripts/ingest_all.py --rebuild
 
 ### 6. 启动服务
 
+方式一（推荐开发时使用，支持热重载）：
+
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-访问 `http://localhost:8000/docs` 查看接口文档，`http://localhost:8000` 打开问答页面。
+方式二（直接运行入口文件，无需记 uvicorn 命令）：
+
+```bash
+python app/main.py
+```
+
+`app/main.py` 会自动把项目根目录加入 `sys.path` 并切换工作目录，因此在 IDE 中直接运行该文件也能正常加载 `.env`、`data/`、`logs/`。监听地址和端口读取 `.env` 中的 `API_HOST` / `API_PORT`。直接运行时会自动打开浏览器（可用 `AUTO_OPEN_BROWSER=false` 关闭）。
+
+> `0.0.0.0` 是监听地址，不能直接用浏览器访问。本机访问请用 `http://127.0.0.1:8000` 或 `http://localhost:8000`；根路径会自动跳转到 `/web/`。
+
+访问 `http://localhost:8000/docs` 查看接口文档，`http://localhost:8000/web/` 打开问答页面。
 
 ### 7. 验证
 
@@ -161,6 +174,14 @@ curl http://localhost:8000/health
 ```
 
 健康检查覆盖五项依赖：MySQL、Redis、Chroma、Ollama embedding、BM25 索引文件。任一项不可用时问答链路会在检索阶段降级，须全部正常后再进行功能验证。
+
+### 8. 性能调优（可选）
+
+- **精排上 GPU**：安装 CUDA 版 PyTorch 后设置 `RERANKER_DEVICE=cuda`、`RERANKER_FP16=true`、`RERANKER_BATCH_SIZE=16`。CUDA 不可用时 `reranker.py` 会自动回退 CPU，不会导致精排崩溃。
+- **启动预热**：`WARMUP_MODELS=true`（默认），服务启动后后台加载 embedding 与 reranker，首个问答不再承担模型加载时间。
+- **延迟优先配置**（会牺牲部分召回率，建议用评测集对比后再定）：
+  `ENABLE_QUERY_REWRITE=false`、`MAX_RETRIEVAL_LOOP=1`、`MAX_DISPATCH_ROUND=2`、
+  `RETRIEVAL_TOP_K=8`、`BM25_TOP_K=8`、`RERANK_TOP_K=5`、`CONTEXT_MAX_CHARS=4000`。
 
 ## 目录结构
 

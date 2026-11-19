@@ -1,14 +1,28 @@
 """FastAPI 应用入口：路由装配、CORS、静态前端与五项健康检查。"""
 from __future__ import annotations
 
+import os
+import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
 
+# 支持直接运行 `python app/main.py`（或 IDE 直接运行本文件）：
+# 1) 把项目根目录加入 sys.path，否则 `from app.xxx import ...` 会因 sys.path
+#    指向 app/ 目录而导入失败；
+# 2) 直接运行时把工作目录切到项目根目录，保证 .env / data / logs 等相对路径正确。
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if __name__ == "__main__":
+    os.chdir(_PROJECT_ROOT)
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import admin as admin_api
@@ -27,8 +41,7 @@ logger = get_logger("main")
 # 探活总时限：外部依赖不可达时健康检查也必须快速返回。
 _HEALTH_TIMEOUT_SECONDS = 3.0
 
-# app/main.py -> app/ -> 项目根目录
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# app/main.py -> app/ -> 项目根目录（_PROJECT_ROOT 已在文件顶部定义）
 _WEB_DIR = _PROJECT_ROOT / "web"
 
 
@@ -142,6 +155,28 @@ def _check_ollama() -> bool:
     return False
 
 
+def _warmup_models() -> None:
+    """后台预热本地模型：避免第一个问答请求承担模型加载时间。"""
+    try:
+        from app.llm.client import get_embeddings
+
+        get_embeddings().embed_query("warmup")
+        logger.info("Embedding 预热完成")
+    except Exception:
+        logger.warning("Embedding 预热失败（不影响服务启动）", exc_info=True)
+
+    try:
+        from app.retrieval.reranker import get_reranker
+
+        ok = get_reranker().warmup()
+        if ok:
+            logger.info("Reranker 预热完成")
+        else:
+            logger.warning("Reranker 预热失败（精排将降级为原序返回）")
+    except Exception:
+        logger.warning("Reranker 预热失败（不影响服务启动）", exc_info=True)
+
+
 def _run_health_checks() -> dict[str, Any]:
     """并行执行四项外部探活，整体最多等 3 秒；BM25 只检查本地索引文件。"""
     checks: dict[str, Any] = {}
@@ -193,9 +228,20 @@ def create_app() -> FastAPI:
     app.include_router(feedback_api.router, prefix="/api")
     app.include_router(admin_api.router, prefix="/api")
 
-    @app.get("/")
-    def root() -> dict[str, str]:
-        return {"service": "PolicyMind", "docs": "/docs", "web": "/web"}
+    @app.on_event("startup")
+    def _start_model_warmup() -> None:
+        if not settings.warmup_models:
+            return
+        threading.Thread(
+            target=_warmup_models, daemon=True, name="model-warmup"
+        ).start()
+
+    @app.get("/", include_in_schema=False)
+    def root():
+        """根路径直接跳到网页；前端目录缺失时回退到服务信息。"""
+        if _WEB_DIR.is_dir():
+            return RedirectResponse(url="/web/", status_code=307)
+        return {"service": "PolicyMind", "docs": "/docs"}
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -221,3 +267,34 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+if __name__ == "__main__":
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    # 0.0.0.0 只是监听地址，不能直接用浏览器访问；本机访问统一用 127.0.0.1。
+    local_host = (
+        "127.0.0.1"
+        if settings.api_host in {"0.0.0.0", "::", ""}
+        else settings.api_host
+    )
+    page_url = f"http://{local_host}:{settings.api_port}/web/"
+    logger.info(
+        "监听 %s:%s，页面：%s",
+        settings.api_host,
+        settings.api_port,
+        page_url,
+    )
+    if settings.auto_open_browser:
+        timer = threading.Timer(1.5, lambda: webbrowser.open(page_url))
+        timer.daemon = True
+        timer.start()
+    uvicorn.run(
+        app,
+        host=settings.api_host,
+        port=settings.api_port,
+        log_level=settings.log_level.lower(),
+    )

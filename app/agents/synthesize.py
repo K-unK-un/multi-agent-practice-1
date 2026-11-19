@@ -118,17 +118,17 @@ def _fallback_answer(evidence: list[dict]) -> str:
             "建议补充制度名称或具体条件后再提问，或向人力资源部门确认。"
         )
     blocks: list[str] = []
-    for index, item in enumerate(evidence[:6], 1):
+    for index, item in enumerate(evidence[:3], 1):
         if not isinstance(item, dict):
             continue
         title = item.get("title") or item.get("doc_id") or "制度"
         article = item.get("article_no") or "?"
         text = str(item.get("text") or "").strip()
-        blocks.append(f"【E{index}】《{title}》第{article}条：{text[:300]}")
+        blocks.append(f"【E{index}】《{title}》第{article}条：{text[:180]}")
     return (
-        "以下为检索到的相关制度条款原文，供参考：\n\n"
+        "以下是检索到的相关条款，供参考：\n\n"
         + "\n\n".join(blocks)
-        + "\n\n说明：以上为条款原文摘录，未经过模型归纳；制度未明确的部分请以原文及人力资源解释为准。"
+        + "\n\n说明：以上为条款摘录，未经过模型归纳；制度未明确处请以原文及人力资源解释为准。"
     )
 
 
@@ -157,7 +157,11 @@ def synthesize_node(state: SupervisorState) -> dict:
     fallback_used = False
     token_usage: dict = {}
     try:
-        ai = get_llm("main").invoke(prompt)
+        llm = get_llm("main")
+        if settings.synthesize_max_tokens > 0:
+            # 只限制最终答案生成长度，不影响专家/规则抽取等其他调用
+            llm = llm.bind(max_tokens=settings.synthesize_max_tokens)
+        ai = llm.invoke(prompt)
         final_answer = _content_text(getattr(ai, "content", "")).strip()
         token_usage = _extract_usage(ai)
         if not final_answer:

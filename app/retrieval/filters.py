@@ -4,6 +4,10 @@
 
 1. status：默认只保留 active；include_archived=True（对比场景）时 active/archived 都保留。
 2. effective_date：<= today 或为空。未填写生效日期的条款视为“不限”，不能被误杀。
+   注意：Chroma 1.0.0 的 where 不接受字符串 metadata 的 $lte（会报
+   "Expected operand value to be an int or a float"），因此向量路的 effective_date
+   改为在 VectorRetriever 拿到结果后按 metadata 在 Python 侧过滤；
+   MySQL/BM25 路仍由 apply_metadata_filters 行级过滤，两路语义保持一致。
 3. scope：与 user_scope 有交集；scope 为空表示全员可见。
 
 元数据存储约定（ingest 写入时必须遵守，否则 Chroma 过滤会漏/误杀）：
@@ -129,35 +133,39 @@ def _as_row_dict(row: Any) -> dict | None:
 # 向量路：Chroma where 下推
 # ---------------------------------------------------------------------------
 
+def is_effective(value: Any, today: date | str | None = None) -> bool:
+    """effective_date 为空/无法解析视为不限；否则必须 <= 今天。
+
+    供向量路在拿到 Chroma 结果后做 Python 侧过滤（Chroma where 不支持字符串 $lte）。
+    """
+    effective = _as_date_str(value)
+    if effective is None:
+        return True
+    return effective <= _today_date(today).isoformat()
+
+
 def build_chroma_where(
     user_scope: list[str] | None,
     include_archived: bool = False,
     today: date | str | None = None,
 ) -> dict:
-    """构造 Chroma 1.5 的 where 过滤条件（{"$and": [...]} 语法）。
+    """构造 Chroma where 过滤条件（{"$and": [...]} 语法）。
 
     - status：include_archived → {"$in": ["active", "archived"]}；否则 "active"。
-    - effective_date：$lte today，或等于空串 / "0000-00-00"（未填写 = 不限）。
-      Chroma 对缺失 metadata key 不匹配任何条件，因此 ingest 必须写空串占位。
     - scope：$in user_scope，或等于空串（全员条款）。
+    - effective_date：不在 where 中下推（Chroma 1.0 对字符串 $lte 会报类型错误），
+      由 VectorRetriever 调用 is_effective() 在 Python 侧过滤；`today` 参数保留兼容。
+
+    Chroma 对缺失 metadata key 不匹配任何条件，因此 ingest 必须写空串占位。
     """
     scopes = _normalize_user_scope(user_scope)
-    today_str = _today_date(today).isoformat()
+    _ = today  # 保留参数：日期过滤已移到 Python 侧
 
     status_cond: dict = (
         {"status": {"$in": ["active", "archived"]}}
         if include_archived
         else {"status": {"$eq": "active"}}
     )
-
-    # 空串 / 零日期按“未填写生效日期”处理，不参与时效过滤
-    effective_cond = {
-        "$or": [
-            {"effective_date": {"$lte": today_str}},
-            {"effective_date": {"$eq": ""}},
-            {"effective_date": {"$eq": "0000-00-00"}},
-        ]
-    }
 
     # scope 为空串 = 全员可见；非空时必须落在用户可见范围内
     scope_cond = {
@@ -167,7 +175,7 @@ def build_chroma_where(
         ]
     }
 
-    return {"$and": [status_cond, effective_cond, scope_cond]}
+    return {"$and": [status_cond, scope_cond]}
 
 
 # ---------------------------------------------------------------------------

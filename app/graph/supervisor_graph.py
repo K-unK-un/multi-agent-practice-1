@@ -2,7 +2,7 @@
 
 同时提供：
 - run_answer_once：同步跑一次问答（评估脚本用）；
-- stream_answer：SSE 事件流（updates + messages 双流），前端链路可视化数据源。
+- stream_answer：SSE 事件流（只消费 updates），前端链路可视化数据源。
 
 流式说明（langgraph 1.2.10 实测）：
     astream(input, config, stream_mode=[...], subgraphs=True)
@@ -35,8 +35,6 @@ from app.store.checkpointer import get_checkpointer
 from app.store.mysql import get_mysql
 
 logger = get_logger("graph.supervisor")
-
-_EXPERTS = ("policy_qa", "compare", "eligibility")
 
 _graph: Any = None
 
@@ -220,40 +218,6 @@ def _split_stream_chunk(chunk: Any) -> tuple[tuple[str, ...], str | None, Any]:
     return (), None, None
 
 
-def _expert_from(namespace: tuple[str, ...], metadata: dict) -> str:
-    """定位 token 事件所属专家。
-
-    create_agent 子图内部节点名为 model/tools，metadata["langgraph_node"] 往往是
-    内部节点名；因此先看 metadata，再回退到 namespace（如 "policy_qa:<task_id>"）。
-    """
-    node = str((metadata or {}).get("langgraph_node") or "")
-    if node in _EXPERTS:
-        return node
-    for part in namespace or ():
-        name = str(part).split(":", 1)[0]
-        if name in _EXPERTS:
-            return name
-    return ""
-
-
-def _message_text(message: Any) -> str:
-    """只取文本增量；tool 消息与纯 tool_call 增量为空。"""
-    if getattr(message, "type", "") == "tool":
-        return ""
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
-        return "".join(parts)
-    return ""
-
-
 def _update_events(node: str, update: Any) -> list[dict]:
     """把一次节点 update 转成 SSE 事件（trace 逐条 + route/review 专项）。"""
     events: list[dict] = []
@@ -354,8 +318,9 @@ async def stream_answer(
 ) -> AsyncIterator[dict]:
     """流式执行一次问答，按 SSE 事件协议逐个 yield。
 
-    事件：route / agent_start / agent_end / tool / synthesize / review / token /
+    事件：route / agent_start / agent_end / tool / synthesize / review /
     citation / clarify / done / error。
+    专家 Agent 的中间 token 不再下发，答案只在 done.final_answer 中给出。
     """
     session_id = session_id or uuid.uuid4().hex
     started = time.perf_counter()
@@ -379,31 +344,21 @@ async def stream_answer(
             async for chunk in graph.astream(
                 inputs,
                 config,
-                stream_mode=["updates", "messages"],
+                stream_mode=["updates"],
                 subgraphs=True,
             ):
-                namespace, mode, data = _split_stream_chunk(chunk)
-                if mode == "updates":
-                    if not isinstance(data, dict):
-                        continue
-                    for node, update in data.items():
-                        _observe_update(observed, update)
-                        for event in _update_events(node, update):
-                            emitted = True
-                            yield event
-                elif mode == "messages":
-                    if not (isinstance(data, tuple) and len(data) == 2):
-                        continue
-                    message, metadata = data
-                    metadata = metadata if isinstance(metadata, dict) else {}
-                    agent = _expert_from(namespace, metadata)
-                    if not agent:
-                        continue
-                    text = _message_text(message)
-                    if not text:
-                        continue
-                    emitted = True
-                    yield {"event": "token", "data": {"agent": agent, "text": text}}
+                _namespace, mode, data = _split_stream_chunk(chunk)
+                if mode != "updates":
+                    # 专家 Agent 的中间 token 不再下发。最终答案只在 done.final_answer
+                    # 中给出，避免前端先渲染“未检索到”等中间稿、随后被终稿反复覆盖。
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                for node, update in data.items():
+                    _observe_update(observed, update)
+                    for event in _update_events(node, update):
+                        emitted = True
+                        yield event
         except Exception as exc:
             # astream 签名/行为不兼容或中途失败：降级处理，保证前端仍能收到收尾事件。
             # - 若尚未产出任何事件（通常是签名不兼容，失败发生在执行前），一次性 invoke；

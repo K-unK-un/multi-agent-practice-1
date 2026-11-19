@@ -1,7 +1,8 @@
 /**
  * PolicyMind 前端交互：
  * - fetch + ReadableStream 手动解析 SSE（EventSource 不支持 POST）
- * - 流式渲染答案、引用高亮，并驱动右侧多 Agent 链路可视化
+ * - 最终答案只在 done 事件到达后渲染一次，避免中间稿反复覆盖
+ * - 引用高亮与右侧多 Agent 链路可视化
  */
 (() => {
     "use strict";
@@ -24,6 +25,16 @@
         eligibility: "资格计算",
         synthesize: "综合生成",
         critic: "质量核查",
+    };
+
+    const INTENT_LABELS = {
+        fact: "事实条款",
+        compare: "版本对比",
+        eligibility: "资格计算",
+        clarify: "澄清",
+        refuse: "超出范围",
+        smalltalk: "寒暄",
+        out_of_scope: "非制度问题",
     };
 
     const $ = (id) => document.getElementById(id);
@@ -93,7 +104,6 @@
         citations: [],
         rawAnswer: "",
         answer: null, // { content: HTMLElement, typing: HTMLElement | null }
-        renderQueued: false,
         flashTimers: new Map(),
         running: new Set(),
         agentsSeen: [],
@@ -968,16 +978,6 @@
         });
     }
 
-    function scheduleRender() {
-        if (state.renderQueued) return;
-        state.renderQueued = true;
-        window.requestAnimationFrame(() => {
-            state.renderQueued = false;
-            renderAnswer();
-            scrollChat(false);
-        });
-    }
-
     function scrollChat(force) {
         const el = els.messages;
         if (!el) return;
@@ -1263,7 +1263,6 @@
         state.citations = [];
         state.rawAnswer = "";
         state.answer = null;
-        state.renderQueued = false;
         state.running.clear();
         state.agentsSeen = [];
         state.flashTimers.forEach((timer) => window.clearTimeout(timer));
@@ -1290,7 +1289,8 @@
     function updateIntent(data) {
         const intentRaw = data.intent || data.route || data.intent_type || "unknown";
         const intent = typeof intentRaw === "string" ? intentRaw : stringifyValue(intentRaw);
-        els.intentBadge.textContent = "意图：" + intent;
+        const intentText = INTENT_LABELS[intent] || intent;
+        els.intentBadge.textContent = "意图：" + intentText;
         els.intentBadge.classList.add("active");
 
         const plan = Array.isArray(data.plan) ? data.plan : [];
@@ -1307,7 +1307,7 @@
                 .join("；");
             if (summary) els.intentBadge.title = summary;
         }
-        setTraceStatus("调度中枢识别意图：" + intent);
+        setTraceStatus("调度中枢识别意图：" + intentText);
         flashNode("supervisor", 1100);
     }
 
@@ -1401,8 +1401,7 @@
     function handleDone(data) {
         stopStreaming();
 
-        // 图会先把各专家的过程 token 推给前端，最终综合答案只在 done.final_answer 中；
-        // 因此只要终稿非空就以终稿覆盖，避免界面停留在专家中间输出上。
+        // 后端不再下发专家中间 token，最终答案只在 done.final_answer 中，直接渲染一次。
         if (typeof data.final_answer === "string" && data.final_answer.trim()) {
             state.rawAnswer = data.final_answer;
             renderAnswer();
@@ -1507,21 +1506,22 @@
                 break;
             }
             case "clarify": {
-                const degraded = data.degraded ? "（降级输出）" : "";
                 flashNode("supervisor", 900);
+                if (data.intent === "smalltalk") {
+                    setTraceStatus("寒暄问候，直接回复（未检索知识库）");
+                    break;
+                }
+                if (data.intent === "out_of_scope") {
+                    setTraceStatus("非制度问题，直接回复（未检索知识库）");
+                    break;
+                }
+                const degraded = data.degraded ? "（降级输出）" : "";
                 setTraceStatus("信息不足或制度未明确，输出澄清回答" + degraded);
                 break;
             }
             case "review":
                 showReview(data);
                 break;
-            case "token": {
-                if (typeof data.text !== "string") break;
-                state.rawAnswer += data.text;
-                removeTyping();
-                scheduleRender();
-                break;
-            }
             case "citation":
                 addCitation(data);
                 break;

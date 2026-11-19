@@ -26,6 +26,22 @@ def _to_float(value: Any) -> float:
             return 0.0
 
 
+def _resolve_device(requested: str) -> str:
+    """请求 cuda 但 CUDA 不可用时回退 cpu，避免整个精排器加载失败。"""
+    device = str(requested or "cpu").strip() or "cpu"
+    if not device.lower().startswith("cuda"):
+        return device
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return device
+        logger.warning("RERANKER_DEVICE=%s 但 CUDA 不可用，回退 CPU", requested)
+    except Exception as exc:
+        logger.warning("检测 CUDA 失败，回退 CPU：%s", exc)
+    return "cpu"
+
+
 class Reranker:
     """CrossEncoder 精排器。"""
 
@@ -48,16 +64,28 @@ class Reranker:
                 apply_hf_offline_env()
                 from sentence_transformers import CrossEncoder
 
+                device = _resolve_device(settings.reranker_device)
+                model_kwargs = None
+                if device.lower().startswith("cuda") and settings.reranker_fp16:
+                    try:
+                        import torch
+
+                        model_kwargs = {"torch_dtype": torch.float16}
+                    except Exception as exc:
+                        logger.warning("启用 fp16 失败，使用默认精度：%s", exc)
+
                 self._model = CrossEncoder(
                     settings.reranker_model,
                     cache_folder=settings.hf_home,
-                    device=settings.reranker_device,
+                    device=device,
                     max_length=settings.reranker_max_length,
+                    model_kwargs=model_kwargs,
                 )
                 logger.info(
-                    "Reranker 已加载：%s（device=%s）",
+                    "Reranker 已加载：%s（device=%s, fp16=%s）",
                     settings.reranker_model,
-                    settings.reranker_device,
+                    device,
+                    bool(model_kwargs),
                 )
             except Exception as exc:
                 # 只尝试一次：避免每条请求都重复一次昂贵的失败加载
@@ -65,6 +93,10 @@ class Reranker:
                 self._model = None
                 logger.warning("Reranker 加载失败（精排降级为原序返回）：%s", exc)
             return self._model
+
+    def warmup(self) -> bool:
+        """启动预热：提前加载模型，避免第一个问答请求承担加载时间。"""
+        return self._ensure_model() is not None
 
     def rerank(self, question: str, docs: list[dict]) -> list[dict]:
         """对候选条款打分并降序截断到 rerank_top_k。

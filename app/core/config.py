@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,10 +21,12 @@ class Settings(BaseSettings):
     # ---------------- 大模型：DeepSeek（OpenAI 兼容）----------------
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    llm_model_main: str = "deepseek-v4-flash"
+    llm_model_main: str = "deepseek-flash"
     llm_model_expert: str = "deepseek-v4-pro"
     llm_temperature: float = 0.2
     llm_max_tokens: int = 2048
+    # synthesize 最终答案的输出上限，避免回答过长（0 表示不单独限制）
+    synthesize_max_tokens: int = 800
     llm_timeout: int = 60
     llm_max_retries: int = 2
 
@@ -41,6 +44,8 @@ class Settings(BaseSettings):
     reranker_device: str = "cpu"
     reranker_batch_size: int = 8
     reranker_max_length: int = 512
+    # GPU 下使用 fp16，降低显存占用并提升速度；CPU 会自动忽略
+    reranker_fp16: bool = True
     rerank_top_k: int = 6
     # critic 句向量核查（默认关闭：先纯规则，G 组实验后再开）
     enable_semantic_check: bool = False
@@ -96,6 +101,10 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:8000"]
     auth_enabled: bool = True
     upload_dir: str = "data/uploads"
+    # 直接运行 app/main.py 时是否自动打开浏览器（uvicorn 命令启动时不生效）
+    auto_open_browser: bool = True
+    # 启动时后台预热 reranker，避免第一个请求承担模型加载时间
+    warmup_models: bool = True
 
     # ---------------- 日志与评估 ----------------
     log_dir: str = "logs"
@@ -119,3 +128,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# 必须在 chromadb / sentence-transformers / huggingface_hub 等第三方库 import 之前
+# 写入进程环境变量：huggingface_hub 会在 import 时缓存 HF_HUB_OFFLINE 的值，之后再
+# 设置就来不及了，导致加载本地 reranker/句向量模型时仍尝试联网（WinError 10060）。
+os.environ.setdefault("HF_HOME", settings.hf_home)
+if settings.hf_hub_offline:
+    os.environ["HF_HUB_OFFLINE"] = "1"
